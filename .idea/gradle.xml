@@ -60,6 +60,7 @@
             <option value="$PROJECT_DIR$/tools/ext/shasum" />
             <option value="$PROJECT_DIR$/tools/ext/tac" />
             <option value="$PROJECT_DIR$/tools/ext/tar" />
+            <option value="$PROJECT_DIR$/tools/ext/timeout" />
             <option value="$PROJECT_DIR$/tools/ext/uuidgen" />
             <option value="$PROJECT_DIR$/tools/ext/which" />
             <option value="$PROJECT_DIR$/tools/ext/whoami" />

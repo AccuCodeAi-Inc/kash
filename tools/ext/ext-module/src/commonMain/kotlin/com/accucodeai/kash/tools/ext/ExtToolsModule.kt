@@ -18,6 +18,7 @@ import com.accucodeai.kash.tools.seq.seqCommands
 import com.accucodeai.kash.tools.shasum.shaSumCommands
 import com.accucodeai.kash.tools.tac.tacCommands
 import com.accucodeai.kash.tools.tar.tarCommands
+import com.accucodeai.kash.tools.timeout.timeoutCommands
 import com.accucodeai.kash.tools.uuidgen.uuidgenCommands
 import com.accucodeai.kash.tools.which.whichCommands
 import com.accucodeai.kash.tools.whoami.whoamiCommands
@@ -48,6 +49,7 @@ public val extCommands: List<CommandSpec> =
         shaSumCommands +
         tacCommands +
         tarCommands +
+        timeoutCommands +
         uuidgenCommands +
         whichCommands +
         whoamiCommands +

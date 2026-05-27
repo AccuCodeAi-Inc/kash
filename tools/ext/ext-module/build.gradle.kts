@@ -22,6 +22,7 @@ kotlin {
             api(project(":tools:ext:seq"))
             api(project(":tools:ext:shasum"))
             api(project(":tools:ext:tac"))
+            api(project(":tools:ext:timeout"))
             api(project(":tools:ext:uuidgen"))
             api(project(":tools:ext:which"))
             api(project(":tools:ext:whoami"))

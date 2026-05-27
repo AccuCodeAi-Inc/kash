@@ -121,6 +121,7 @@ include(
     ":tools:ext:seq",
     ":tools:ext:shasum",
     ":tools:ext:tac",
+    ":tools:ext:timeout",
     ":tools:ext:uuidgen",
     ":tools:ext:which",
     ":tools:ext:whoami",

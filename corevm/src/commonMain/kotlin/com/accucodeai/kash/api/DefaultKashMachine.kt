@@ -10,8 +10,10 @@ import com.accucodeai.kash.api.signal.KashSignal
 import com.accucodeai.kash.fs.FileSystem
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.JsonElement
 
 /**
@@ -195,7 +197,21 @@ internal class DefaultKashMachine(
                 ExitStatus.Exited(block(child))
             } catch (ce: CancellationException) {
                 // Coroutine cancellation: propagate to keep structured
-                // concurrency intact. Don't synthesize an exit status here.
+                // concurrency intact. Don't synthesize an exit status here —
+                // but DO reap the process-table record. The child was killed
+                // (e.g. `timeout` cancelling an over-deadline utility), so it
+                // must not linger as a phantom "running" process: that would
+                // leak the entry and break snapshot save, which refuses to
+                // serialize a machine with a running command. NonCancellable
+                // so the table mutation still completes under the cancelled job.
+                withContext(NonCancellable) {
+                    tableMutex.withLock {
+                        reparentChildrenToInit(child, dyingPid = child.pid)
+                        processTable.remove(child.pid)
+                        exitDeferreds.remove(child.pid)
+                    }
+                }
+                if (!exitDeferred.isCompleted) exitDeferred.completeExceptionally(ce)
                 throw ce
             } catch (t: Throwable) {
                 // Any uncaught throw becomes a non-zero exit. Later phases
