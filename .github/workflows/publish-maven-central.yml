@@ -22,11 +22,8 @@ on:
     tags: ['v*']
   workflow_dispatch:
 
-# Don't run two publishes against the same ref at once; let an in-flight
-# publish finish rather than cancelling it.
-concurrency:
-  group: maven-central-${{ github.ref }}
-  cancel-in-progress: false
+# Concurrency is set per-job (below): snapshots supersede each other (cancel
+# in-progress), but releases must never be cancelled mid-publish.
 
 permissions:
   contents: read
@@ -36,6 +33,10 @@ jobs:
     # Only on a push to main (tag pushes have ref refs/tags/*, not this).
     if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
+    # A newer snapshot makes an in-flight one obsolete, so cancel the old run.
+    concurrency:
+      group: maven-central-snapshot
+      cancel-in-progress: true
     # Credentials live in the "release" environment's secrets; a job can only
     # read environment-scoped secrets when it declares the environment.
     environment: release
@@ -61,6 +62,11 @@ jobs:
     # Only on a v* tag push.
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
+    # Per-tag group and never cancel: a release publish must run to completion,
+    # and distinct tags don't interfere with each other.
+    concurrency:
+      group: maven-central-release-${{ github.ref }}
+      cancel-in-progress: false
     # The credentials and GPG signing key are stored as secrets in the
     # "release" environment. A job can only read environment-scoped secrets
     # when it declares that environment; without this line secrets.* resolve to

@@ -21,10 +21,11 @@ permissions:
   pages: write
   id-token: write
 
-# Serialize Pages deploys; don't cancel an in-flight publish.
+# Only the latest site matters: cancel an in-flight build/deploy when a newer
+# push to main supersedes it.
 concurrency:
   group: pages
-  cancel-in-progress: false
+  cancel-in-progress: true
 
 jobs:
   build:
