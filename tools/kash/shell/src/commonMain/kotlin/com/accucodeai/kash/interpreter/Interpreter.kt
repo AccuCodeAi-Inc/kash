@@ -730,6 +730,14 @@ public class Interpreter(
     internal var currentForegroundJob: Job? = null
 
     /**
+     * Rolling counter for the loop cooperative-yield checkpoint (see
+     * `loopCheckpoint` in InterpreterControlFlow). Shared across nested loops
+     * in this interpreter — we only want a periodic breather overall, not
+     * per-loop. Per-instance so forked subshells get their own cadence.
+     */
+    internal var cooperativeTick: Int = 0
+
+    /**
      * The currently-executing foreground statement's [KashJob], when
      * monitor mode (`set -m`) is on and we registered the statement
      * with [jobControl] for stop/cont bookkeeping. Read by

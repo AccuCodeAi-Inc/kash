@@ -21,10 +21,45 @@ import com.accucodeai.kash.interpreter.Interpreter.ReturnException
 import com.accucodeai.kash.interpreter.Interpreter.ScriptAbortException
 import com.accucodeai.kash.interpreter.Interpreter.Stdio
 import com.accucodeai.kash.parser.isShellIdentifier
+import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.yield
+import kotlin.time.Duration.Companion.milliseconds
 
 // Control-flow commands (if/for/while/case/cond/group/subshell) extracted from Interpreter.
+
+// Yield batch size for [loopCheckpoint]'s pure-CPU breather.
+private const val YIELD_BATCH_MASK = 0x3FF // every 1024 iterations
+
+/**
+ * Cooperative checkpoint for loop bodies with no inherent suspension (busy
+ * `for`/`while`, tight arithmetic `for ((;;))`). Three concerns, separated:
+ *
+ *  - `ensureActive()` — honor scope/job cancellation promptly. On the JVM
+ *    (multi-threaded dispatcher) a cross-thread cancel is observed without
+ *    suspending; on a single-threaded runtime it takes effect once one of the
+ *    branches below has suspended and let the canceller run.
+ *  - `delay(1)`, **only under a virtual-time test clock** — the
+ *    kotlinx-coroutines-test scheduler advances virtual time only when
+ *    something calls `delay`, so a busy loop must pump it 1ms/iteration for a
+ *    backgrounded timer to mature before the while-loop safety cap (the bash
+ *    trap9 case: `{ sleep 1; kill -USR1 $$; } &` racing `while :; do :; done`).
+ *    In production ([clock] is not a test clock) real time advances on its own,
+ *    so we skip the delay entirely — no per-iteration throttle.
+ *  - otherwise a *batched* `yield()` — a periodic breather that returns to the
+ *    wasm event loop (repaint + Ctrl-C delivery) and re-checks cancellation,
+ *    without the per-iteration 1ms throttle `delay` would impose. `yield()`
+ *    does not advance the virtual clock, so pure-CPU loops stay full-speed.
+ */
+private suspend fun Interpreter.loopCheckpoint() {
+    currentCoroutineContext().ensureActive()
+    if (clock.isTestClock) {
+        delay(1.milliseconds)
+    } else if ((cooperativeTick++ and YIELD_BATCH_MASK) == 0) {
+        yield()
+    }
+}
 
 // -------- Control flow --------
 
@@ -70,6 +105,10 @@ internal suspend fun Interpreter.runFor(
     loopDepth++
     try {
         for (item in items) {
+            // A long `for` over a big word list (e.g. a brute-force expansion)
+            // is pure CPU with no inherent suspension — keep it cancellable and
+            // the UI responsive without throttling throughput.
+            loopCheckpoint()
             if (xtrace) emitXtrace("for ${cmd.variable} in ${items.joinToString(" ")}", sink = stdio.stderr)
             if (varTable.find(cmd.variable)?.isReadonly == true) {
                 stdio.stderr.writeUtf8("${shellDiagPrefix()}${cmd.variable}: readonly variable\n")
@@ -201,7 +240,7 @@ internal suspend fun Interpreter.runArithFor(
                 evalArithRaw(cmd.update)
                 if (arithLastError) return 1
             }
-            yield()
+            loopCheckpoint()
         }
     } finally {
         loopDepth--
@@ -219,7 +258,7 @@ internal suspend fun Interpreter.runArithCommand(cmd: ArithCommand): Int {
     // catch path (which uses the `((:` framing for all syntax errors)
     // doesn't mask the more specific bash diagnostic.
     val m =
-        Regex("^\\s*([A-Za-z_][A-Za-z0-9_]*)\\[\\$([A-Za-z_][A-Za-z0-9_]*)\\]\\s*$")
+        Regex("^\\s*([A-Za-z_][A-Za-z0-9_]*)\\[\\$([A-Za-z_][A-Za-z0-9_]*)]\\s*$")
             .matchEntire(cmd.rawText)
     if (m != null) {
         val arrName = m.groupValues[1]
@@ -316,20 +355,7 @@ internal suspend fun Interpreter.runWhile(
                 if (c.count > 1) throw ContinueException(c.count - 1)
                 continue@loop
             }
-            // Loop bodies with no inherent suspension (e.g. `while true; do
-            // :; done`, busy arithmetic) would otherwise starve wasm's
-            // single JS thread and block Ctrl-C delivery, AND prevent the
-            // kotlinx-coroutines-test virtual clock from advancing (a known
-            // limitation — see Kotlin/kotlinx.coroutines#2605: `yield()`
-            // and `delay(0)` both attempt 0-duration advancement, so a
-            // backgrounded `{ sleep 1; kill -USR1 $$; } &` racing this
-            // loop never gets to fire its kill). `delay(1)` advances 1ms
-            // of virtual time per iteration in tests (so signal-driven
-            // exit fires before the safety counter trips), and on real
-            // dispatchers acts as yield + 1ms throttle which is fine
-            // for tight busy loops that are almost always either bug-
-            // shaped or signal-driven anyway.
-            delay(1)
+            loopCheckpoint()
         }
     } finally {
         loopDepth--

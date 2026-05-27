@@ -24,6 +24,18 @@ import kotlin.time.TimeSource
  * timezone to UTC so `+%s`/`%z` round-trip deterministically.
  */
 public interface ShellClock {
+    /**
+     * True when this clock is driven by a virtual-time test scheduler
+     * (kotlinx-coroutines-test), where `kotlinx.coroutines.delay` advances time
+     * synthetically instead of against the wall clock. The interpreter's loop
+     * checkpoint reads this: under virtual time a busy loop racing a
+     * backgrounded job must pump the clock (`delay`) for that job's timer to
+     * mature; in production real time advances on its own, so the loop can just
+     * `yield()` and skip the per-iteration throttle. Production clocks leave it
+     * false.
+     */
+    public val isTestClock: Boolean get() = false
+
     /** Wall-clock instant — backs `$EPOCHSECONDS`, `$EPOCHREALTIME`, `date`. */
     public fun now(): Instant
 

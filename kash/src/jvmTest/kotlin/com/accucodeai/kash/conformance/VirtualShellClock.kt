@@ -26,6 +26,8 @@ internal class VirtualShellClock(
 ) : ShellClock {
     private val startMillis: Long = scheduler.currentTime
 
+    override val isTestClock: Boolean = true
+
     override fun now(): Instant = Instant.fromEpochMilliseconds(wallEpochMs + scheduler.currentTime)
 
     override fun elapsedSinceShellStart() = (scheduler.currentTime - startMillis).milliseconds
