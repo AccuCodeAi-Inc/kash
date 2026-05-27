@@ -24,7 +24,7 @@ local.properties
 .idea/discord.xml
 .idea/sonarlint
 .idea/artifacts
-.idea/jsLibrayMappings.xml
+.idea/jsLibraryMappings.xml
 
 # OS
 .DS_Store
