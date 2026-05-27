@@ -1,0 +1,15 @@
+[submodule "external/bash"]
+	path = external/bash
+	url = https://git.savannah.gnu.org/git/bash.git
+	shallow = true
+[submodule "external/modernish"]
+	path = external/modernish
+	url = https://github.com/modernish/modernish.git
+	shallow = true
+[submodule "external/jq"]
+	path = external/jq
+	url = https://github.com/jqlang/jq.git
+	shallow = true
+[submodule "external/onetrueawk"]
+	path = external/onetrueawk
+	url = https://github.com/onetrueawk/awk

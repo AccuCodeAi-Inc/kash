@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project version="4">
+  <component name="JavaScriptLibraryMappings">
+    <excludedPredefinedLibrary name="kash/.claude/worktrees/agent-a4025c5e7f26c4d80/build/wasm/node_modules" />
+    <excludedPredefinedLibrary name="kash/.claude/worktrees/agent-a990dd1a071be3c49/build/wasm/node_modules" />
+    <excludedPredefinedLibrary name="kash/.claude/worktrees/agent-ac1e3420725be79ec/build/wasm/node_modules" />
+  </component>
+</project>

@@ -1,0 +1,121 @@
+[versions]
+kotlin = "2.3.21"
+kotlinxCoroutines = "1.10.2"
+kotlinxDatetime = "0.7.1"
+kotlinxIo = "0.9.0"
+kotlinxSerialization = "1.9.0"
+ktlint = "14.2.0"
+junitJupiter = "5.11.4"
+re2j = "1.8"
+graalpy = "25.0.2"
+antlrKotlin = "1.0.10"
+kotlincryptoHash = "0.7.0"
+pyodide = "0.29.4"
+composeMultiplatform = "1.7.3"
+# Eclipse JGit — pure-Java git implementation. EDL 1.0 (BSD-3-Clause).
+# Used by :tools:kash:git-jgit to back the kash git tool against a
+# real Repository object (in-memory or on-disk). JVM-only.
+jgit = "7.6.0.202603022253-r"
+# SLF4J — pulled in transitively by JGit. We ship the NOP provider on
+# kash-app's runtime classpath so SLF4J 2.x's ServiceLoader finds a
+# binding and skips the "No SLF4J providers were found" warning that
+# would otherwise hit stderr on every CLI start. 2.0.x to match jgit's
+# slf4j-api transitive.
+slf4j = "2.0.16"
+# Ktor — Kotlin Multiplatform HTTP client. JVM-only inside kash today
+# (loaded by :shared:net under jvmMain); the wasmJs `actual` of
+# KashKtorClient throws, so no ktor-js engine is pulled in.
+ktor = "3.0.3"
+# Apache Commons Compress — bzip2 streams (pure Java) for :tools:ext:bzip2.
+commonsCompress = "1.28.0"
+# Tukaani XZ for Java — pure-Java XZ / LZMA codec, BSD 0-clause.
+# Used by :tools:ext:xz on JVM. Streaming InputStream/OutputStream API.
+tukaaniXz = "1.12"
+# io.airlift:aircompressor — pure-Java zstd implementation (used by Trino/Presto).
+# Apache-2.0. Pulled in by :tools:ext:zstd. JVM-only; wasmJs gets a stub.
+aircompressor = "2.0.2"
+# JetBrains Koog — multiplatform agent framework. Apache-2.0. Backs the
+# `agent` tool in :tools:ai:agent (OpenAI-compatible LLM client with
+# custom baseUrl support for LM Studio / Ollama / OpenAI, streaming).
+koog = "1.0.0"
+# cryptography-kotlin (whyoleg). Apache-2.0. Multiplatform crypto API
+# (JCA-backed on JVM via cryptography-provider-jdk; SubtleCrypto-backed on
+# wasmJs via cryptography-provider-webcrypto). Used by :tools:forensics:openssl
+# for `enc`, `rand`, and `dgst -hmac`. Transitively pulls in cryptography-random
+# (CryptographyRandom.Default).
+cryptographyKotlin = "0.6.0"
+# Vanniktech Maven Publish — wraps `maven-publish` + signing with KMP-aware
+# defaults (publishes the root multiplatform module + per-target artifacts,
+# auto-generates sources/javadoc jars). Apache-2.0.
+vanniktechMavenPublish = "0.30.0"
+
+[libraries]
+kotlinGradlePlugin = { module = "org.jetbrains.kotlin:kotlin-gradle-plugin", version.ref = "kotlin" }
+kotlinSerializationGradlePlugin = { module = "org.jetbrains.kotlin:kotlin-serialization", version.ref = "kotlin" }
+ktlintGradlePlugin = { module = "org.jlleitschuh.gradle:ktlint-gradle", version.ref = "ktlint" }
+antlrKotlinGradlePlugin = { module = "com.strumenta:antlr-kotlin-gradle-plugin", version.ref = "antlrKotlin" }
+composeMultiplatformGradlePlugin = { module = "org.jetbrains.compose:compose-gradle-plugin", version.ref = "composeMultiplatform" }
+kotlinComposeCompilerGradlePlugin = { module = "org.jetbrains.kotlin:compose-compiler-gradle-plugin", version.ref = "kotlin" }
+vanniktechMavenPublishGradlePlugin = { module = "com.vanniktech:gradle-maven-publish-plugin", version.ref = "vanniktechMavenPublish" }
+antlrKotlinRuntime = { module = "com.strumenta:antlr-kotlin-runtime", version.ref = "antlrKotlin" }
+
+kotlinxCoroutinesCore = { module = "org.jetbrains.kotlinx:kotlinx-coroutines-core", version.ref = "kotlinxCoroutines" }
+kotlinxCoroutinesTest = { module = "org.jetbrains.kotlinx:kotlinx-coroutines-test", version.ref = "kotlinxCoroutines" }
+kotlinxDatetime = { module = "org.jetbrains.kotlinx:kotlinx-datetime", version.ref = "kotlinxDatetime" }
+kotlinxIo = { module = "org.jetbrains.kotlinx:kotlinx-io-core", version.ref = "kotlinxIo" }
+kotlinxIoBytestring = { module = "org.jetbrains.kotlinx:kotlinx-io-bytestring", version.ref = "kotlinxIo" }
+kotlinxSerializationJson = { module = "org.jetbrains.kotlinx:kotlinx-serialization-json", version.ref = "kotlinxSerialization" }
+
+kotlinTest = { module = "org.jetbrains.kotlin:kotlin-test", version.ref = "kotlin" }
+
+junitJupiterApi = { module = "org.junit.jupiter:junit-jupiter-api", version.ref = "junitJupiter" }
+junitJupiterEngine = { module = "org.junit.jupiter:junit-jupiter-engine", version.ref = "junitJupiter" }
+junitJupiterParams = { module = "org.junit.jupiter:junit-jupiter-params", version.ref = "junitJupiter" }
+
+re2j = { module = "com.google.re2j:re2j", version.ref = "re2j" }
+
+# Pure-Kotlin multiplatform hash functions. Used by tools/ext/shasum on
+# non-JVM targets (wasmJs). JVM stays on java.security.MessageDigest.
+kotlincryptoHashSha1 = { module = "org.kotlincrypto.hash:sha1", version.ref = "kotlincryptoHash" }
+kotlincryptoHashSha2 = { module = "org.kotlincrypto.hash:sha2", version.ref = "kotlincryptoHash" }
+kotlincryptoHashMd = { module = "org.kotlincrypto.hash:md", version.ref = "kotlincryptoHash" }
+
+# GraalPy embedding. Optional — only :tools:python3-graalpy pulls these in.
+# Works on stock OpenJDK 21 (interpreter-only mode; warning silenced via
+# polyglot.engine.WarnInterpreterOnly=false). Native Image is NOT required.
+graalvmPolyglot = { module = "org.graalvm.polyglot:polyglot", version.ref = "graalpy" }
+graalvmPolyglotPython = { module = "org.graalvm.polyglot:python", version.ref = "graalpy" }
+graalvmPythonEmbedding = { module = "org.graalvm.python:python-embedding", version.ref = "graalpy" }
+
+# Eclipse JGit. EDL 1.0 (BSD-3-Clause). JVM-only; pulled in by the
+# `:tools:kash:git-jgit` host adapter.
+jgit = { module = "org.eclipse.jgit:org.eclipse.jgit", version.ref = "jgit" }
+slf4jNop = { module = "org.slf4j:slf4j-nop", version.ref = "slf4j" }
+
+# Ktor HTTP client + CIO engine. JVM-only inside kash (see :shared:net).
+ktorClientCore = { module = "io.ktor:ktor-client-core", version.ref = "ktor" }
+ktorClientCio = { module = "io.ktor:ktor-client-cio", version.ref = "ktor" }
+
+# Apache Commons Compress — pure-Java bzip2 streams. JVM-only; wasmJs stub.
+commonsCompress = { module = "org.apache.commons:commons-compress", version.ref = "commonsCompress" }
+
+# Tukaani XZ for Java. BSD 0-clause. JVM-only (pulled in by :tools:ext:xz).
+tukaaniXz = { module = "org.tukaani:xz", version.ref = "tukaaniXz" }
+
+# io.airlift:aircompressor — pure-Java zstd. Apache-2.0. JVM-only.
+aircompressor = { module = "io.airlift:aircompressor", version.ref = "aircompressor" }
+
+# Koog — JetBrains' Kotlin Multiplatform agent framework. Umbrella artifact;
+# pulls in the OpenAI-compatible LLM client (with custom baseUrl override
+# for LM Studio / Ollama), the streaming API, and the tool registry.
+koogAgents = { module = "ai.koog:koog-agents", version.ref = "koog" }
+
+# cryptography-kotlin. Apache-2.0. JVM + wasmJs providers wrap JCA / SubtleCrypto.
+cryptographyCore = { module = "dev.whyoleg.cryptography:cryptography-core", version.ref = "cryptographyKotlin" }
+cryptographyProviderJdk = { module = "dev.whyoleg.cryptography:cryptography-provider-jdk", version.ref = "cryptographyKotlin" }
+cryptographyProviderWebcrypto = { module = "dev.whyoleg.cryptography:cryptography-provider-webcrypto", version.ref = "cryptographyKotlin" }
+
+[plugins]
+kotlinMultiplatform = { id = "org.jetbrains.kotlin.multiplatform", version.ref = "kotlin" }
+kotlinSerialization = { id = "org.jetbrains.kotlin.plugin.serialization", version.ref = "kotlin" }
+ktlint = { id = "org.jlleitschuh.gradle.ktlint", version.ref = "ktlint" }

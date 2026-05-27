@@ -1,0 +1,32 @@
+# Bash conformance xfail list
+#
+# Lines list the basename of a `<name>.tests` / `<name>.right` pair under
+# external/bash/tests/ that Kash is currently expected to fail. The runner
+# (BashTestPairRunner) accepts a mismatch for any name listed here and FAILS
+# LOUDLY if a listed test starts passing — that's how we notice progress.
+#
+# Seeded from the first run of `./gradlew conformanceTest` against an
+# unfinished Kash. Prune entries as the interpreter learns each feature.
+#
+# Format: one basename per line, `#` comments allowed.
+
+builtins
+comsub2
+cond
+dbg-support
+errors
+exp
+glob
+globstar
+histexp
+history
+intl
+invocation
+nameref
+printf
+quotearray
+read
+redir
+shopt
+test
+varenv

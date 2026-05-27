@@ -1,0 +1,175 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project version="4">
+  <component name="GradleMigrationSettings" migrationVersion="1" />
+  <component name="GradleSettings">
+    <option name="linkedExternalProjectsSettings">
+      <GradleProjectSettings>
+        <compositeConfiguration>
+          <compositeBuild compositeDefinitionSource="SCRIPT">
+            <builds>
+              <build path="$PROJECT_DIR$/build-logic" name="build-logic">
+                <projects>
+                  <project path="$PROJECT_DIR$/build-logic" />
+                  <project path="$PROJECT_DIR$/build-logic/convention" />
+                </projects>
+              </build>
+            </builds>
+          </compositeBuild>
+        </compositeConfiguration>
+        <option name="externalProjectPath" value="$PROJECT_DIR$" />
+        <option name="gradleJvm" value="#JAVA_HOME" />
+        <option name="modules">
+          <set>
+            <option value="$PROJECT_DIR$" />
+            <option value="$PROJECT_DIR$/api" />
+            <option value="$PROJECT_DIR$/build-logic" />
+            <option value="$PROJECT_DIR$/build-logic/convention" />
+            <option value="$PROJECT_DIR$/coretest" />
+            <option value="$PROJECT_DIR$/corevm" />
+            <option value="$PROJECT_DIR$/kash" />
+            <option value="$PROJECT_DIR$/kash-app" />
+            <option value="$PROJECT_DIR$/kash-app-web" />
+            <option value="$PROJECT_DIR$/shared" />
+            <option value="$PROJECT_DIR$/shared/antlr-runtime" />
+            <option value="$PROJECT_DIR$/shared/difflib" />
+            <option value="$PROJECT_DIR$/shared/fflate" />
+            <option value="$PROJECT_DIR$/shared/hash" />
+            <option value="$PROJECT_DIR$/shared/kmagic" />
+            <option value="$PROJECT_DIR$/shared/net" />
+            <option value="$PROJECT_DIR$/shared/regex" />
+            <option value="$PROJECT_DIR$/tools" />
+            <option value="$PROJECT_DIR$/tools/ai" />
+            <option value="$PROJECT_DIR$/tools/ai/agent" />
+            <option value="$PROJECT_DIR$/tools/ai/ai-module" />
+            <option value="$PROJECT_DIR$/tools/ext" />
+            <option value="$PROJECT_DIR$/tools/ext/base64" />
+            <option value="$PROJECT_DIR$/tools/ext/bzip2" />
+            <option value="$PROJECT_DIR$/tools/ext/clear" />
+            <option value="$PROJECT_DIR$/tools/ext/column" />
+            <option value="$PROJECT_DIR$/tools/ext/cpio" />
+            <option value="$PROJECT_DIR$/tools/ext/curl" />
+            <option value="$PROJECT_DIR$/tools/ext/ext-module" />
+            <option value="$PROJECT_DIR$/tools/ext/gzip" />
+            <option value="$PROJECT_DIR$/tools/ext/hexdump" />
+            <option value="$PROJECT_DIR$/tools/ext/lz4" />
+            <option value="$PROJECT_DIR$/tools/ext/pax" />
+            <option value="$PROJECT_DIR$/tools/ext/printenv" />
+            <option value="$PROJECT_DIR$/tools/ext/reset" />
+            <option value="$PROJECT_DIR$/tools/ext/rev" />
+            <option value="$PROJECT_DIR$/tools/ext/seq" />
+            <option value="$PROJECT_DIR$/tools/ext/shasum" />
+            <option value="$PROJECT_DIR$/tools/ext/tac" />
+            <option value="$PROJECT_DIR$/tools/ext/tar" />
+            <option value="$PROJECT_DIR$/tools/ext/uuidgen" />
+            <option value="$PROJECT_DIR$/tools/ext/which" />
+            <option value="$PROJECT_DIR$/tools/ext/whoami" />
+            <option value="$PROJECT_DIR$/tools/ext/xz" />
+            <option value="$PROJECT_DIR$/tools/ext/yes" />
+            <option value="$PROJECT_DIR$/tools/ext/zip" />
+            <option value="$PROJECT_DIR$/tools/ext/zstd" />
+            <option value="$PROJECT_DIR$/tools/forensics" />
+            <option value="$PROJECT_DIR$/tools/forensics/binwalk" />
+            <option value="$PROJECT_DIR$/tools/forensics/forensics-module" />
+            <option value="$PROJECT_DIR$/tools/forensics/openssl" />
+            <option value="$PROJECT_DIR$/tools/forensics/strings" />
+            <option value="$PROJECT_DIR$/tools/forensics/xxd" />
+            <option value="$PROJECT_DIR$/tools/kash" />
+            <option value="$PROJECT_DIR$/tools/kash/ed" />
+            <option value="$PROJECT_DIR$/tools/kash/fzf" />
+            <option value="$PROJECT_DIR$/tools/kash/git" />
+            <option value="$PROJECT_DIR$/tools/kash/git-http" />
+            <option value="$PROJECT_DIR$/tools/kash/git-jgit" />
+            <option value="$PROJECT_DIR$/tools/kash/jq" />
+            <option value="$PROJECT_DIR$/tools/kash/kash-module" />
+            <option value="$PROJECT_DIR$/tools/kash/less" />
+            <option value="$PROJECT_DIR$/tools/kash/nano" />
+            <option value="$PROJECT_DIR$/tools/kash/python3" />
+            <option value="$PROJECT_DIR$/tools/kash/python3-graalpy" />
+            <option value="$PROJECT_DIR$/tools/kash/python3-pyodide" />
+            <option value="$PROJECT_DIR$/tools/kash/shell" />
+            <option value="$PROJECT_DIR$/tools/kash/vi" />
+            <option value="$PROJECT_DIR$/tools/posix" />
+            <option value="$PROJECT_DIR$/tools/posix/awk" />
+            <option value="$PROJECT_DIR$/tools/posix/basename" />
+            <option value="$PROJECT_DIR$/tools/posix/bc" />
+            <option value="$PROJECT_DIR$/tools/posix/cal" />
+            <option value="$PROJECT_DIR$/tools/posix/cat" />
+            <option value="$PROJECT_DIR$/tools/posix/chmod" />
+            <option value="$PROJECT_DIR$/tools/posix/cksum" />
+            <option value="$PROJECT_DIR$/tools/posix/cmp" />
+            <option value="$PROJECT_DIR$/tools/posix/comm" />
+            <option value="$PROJECT_DIR$/tools/posix/cp" />
+            <option value="$PROJECT_DIR$/tools/posix/csplit" />
+            <option value="$PROJECT_DIR$/tools/posix/cut" />
+            <option value="$PROJECT_DIR$/tools/posix/date" />
+            <option value="$PROJECT_DIR$/tools/posix/dd" />
+            <option value="$PROJECT_DIR$/tools/posix/df" />
+            <option value="$PROJECT_DIR$/tools/posix/diff" />
+            <option value="$PROJECT_DIR$/tools/posix/dirname" />
+            <option value="$PROJECT_DIR$/tools/posix/du" />
+            <option value="$PROJECT_DIR$/tools/posix/echo" />
+            <option value="$PROJECT_DIR$/tools/posix/env" />
+            <option value="$PROJECT_DIR$/tools/posix/expand" />
+            <option value="$PROJECT_DIR$/tools/posix/expr" />
+            <option value="$PROJECT_DIR$/tools/posix/file" />
+            <option value="$PROJECT_DIR$/tools/posix/find" />
+            <option value="$PROJECT_DIR$/tools/posix/fold" />
+            <option value="$PROJECT_DIR$/tools/posix/getconf" />
+            <option value="$PROJECT_DIR$/tools/posix/getopt" />
+            <option value="$PROJECT_DIR$/tools/posix/grep" />
+            <option value="$PROJECT_DIR$/tools/posix/head" />
+            <option value="$PROJECT_DIR$/tools/posix/id" />
+            <option value="$PROJECT_DIR$/tools/posix/join" />
+            <option value="$PROJECT_DIR$/tools/posix/ln" />
+            <option value="$PROJECT_DIR$/tools/posix/logname" />
+            <option value="$PROJECT_DIR$/tools/posix/ls" />
+            <option value="$PROJECT_DIR$/tools/posix/make" />
+            <option value="$PROJECT_DIR$/tools/posix/mkdir" />
+            <option value="$PROJECT_DIR$/tools/posix/mkfifo" />
+            <option value="$PROJECT_DIR$/tools/posix/mktemp" />
+            <option value="$PROJECT_DIR$/tools/posix/mv" />
+            <option value="$PROJECT_DIR$/tools/posix/nice" />
+            <option value="$PROJECT_DIR$/tools/posix/nl" />
+            <option value="$PROJECT_DIR$/tools/posix/nohup" />
+            <option value="$PROJECT_DIR$/tools/posix/od" />
+            <option value="$PROJECT_DIR$/tools/posix/paste" />
+            <option value="$PROJECT_DIR$/tools/posix/patch" />
+            <option value="$PROJECT_DIR$/tools/posix/pathchk" />
+            <option value="$PROJECT_DIR$/tools/posix/pgrep" />
+            <option value="$PROJECT_DIR$/tools/posix/pkill" />
+            <option value="$PROJECT_DIR$/tools/posix/posix-module" />
+            <option value="$PROJECT_DIR$/tools/posix/printf" />
+            <option value="$PROJECT_DIR$/tools/posix/ps" />
+            <option value="$PROJECT_DIR$/tools/posix/readlink" />
+            <option value="$PROJECT_DIR$/tools/posix/realpath" />
+            <option value="$PROJECT_DIR$/tools/posix/rm" />
+            <option value="$PROJECT_DIR$/tools/posix/rmdir" />
+            <option value="$PROJECT_DIR$/tools/posix/sed" />
+            <option value="$PROJECT_DIR$/tools/posix/sh" />
+            <option value="$PROJECT_DIR$/tools/posix/shuf" />
+            <option value="$PROJECT_DIR$/tools/posix/sleep" />
+            <option value="$PROJECT_DIR$/tools/posix/sort" />
+            <option value="$PROJECT_DIR$/tools/posix/split" />
+            <option value="$PROJECT_DIR$/tools/posix/stat" />
+            <option value="$PROJECT_DIR$/tools/posix/sum" />
+            <option value="$PROJECT_DIR$/tools/posix/tail" />
+            <option value="$PROJECT_DIR$/tools/posix/tee" />
+            <option value="$PROJECT_DIR$/tools/posix/test" />
+            <option value="$PROJECT_DIR$/tools/posix/touch" />
+            <option value="$PROJECT_DIR$/tools/posix/tput" />
+            <option value="$PROJECT_DIR$/tools/posix/tr" />
+            <option value="$PROJECT_DIR$/tools/posix/tree" />
+            <option value="$PROJECT_DIR$/tools/posix/truefalse" />
+            <option value="$PROJECT_DIR$/tools/posix/tsort" />
+            <option value="$PROJECT_DIR$/tools/posix/tty" />
+            <option value="$PROJECT_DIR$/tools/posix/uname" />
+            <option value="$PROJECT_DIR$/tools/posix/unexpand" />
+            <option value="$PROJECT_DIR$/tools/posix/uniq" />
+            <option value="$PROJECT_DIR$/tools/posix/wc" />
+            <option value="$PROJECT_DIR$/tools/posix/xargs" />
+          </set>
+        </option>
+      </GradleProjectSettings>
+    </option>
+  </component>
+</project>

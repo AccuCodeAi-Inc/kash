@@ -1,0 +1,172 @@
+Copyright 2026 AccucodeAI
+
+This product includes software developed by the Kash project
+(https://github.com/AccuCodeAi-Inc/kash), licensed under the Apache License,
+Version 2.0.
+
+This NOTICE file is provided in compliance with Section 4(d) of the
+Apache License, Version 2.0. It documents third-party dependencies and
+their licenses, and records the test-only / non-distributed status of
+GPL-licensed components vendored as git submodules under `external/`.
+
+---
+
+# Third-Party Dependencies and Licenses
+
+## Production Dependencies
+
+### Core (used by all modules)
+
+All core production dependencies are licensed under Apache 2.0 or MIT:
+
+- **Kotlin** (Apache 2.0) — language and stdlib, used by every module
+- **kotlinx-coroutines** (Apache 2.0) — used by `:api` and every tool for streaming I/O
+- **kotlinx-io** (Apache 2.0) — used by `:api` for `RawSource`/`RawSink` pipe plumbing
+- **kotlinx-serialization** (Apache 2.0) — used by `:tools:jq` for JSON parsing/emission
+- **Koin** — `koin-core` and `koin-annotations` (Apache 2.0) — DI container used by every tool's `@Module` registration
+- **antlr-kotlin-runtime** (`com.strumenta:antlr-kotlin-runtime`, Apache 2.0) — runtime for the ANTLR-generated kash parser in `:core`
+
+### Tool-specific dependencies
+
+Most shipped tools (`basename`, `chmod`, `cut`, `dirname`, `head`, `ls`, `mkdir`,
+`rm`, `rmdir`, `seq`, `shasum`, `sleep`, `sort`, `stat`, `tail`, `tee`, `touch`,
+`tr`, `uniq`, `wc`, `xargs`) have no third-party runtime dependencies beyond
+the core stack above — they are pure Kotlin implementations against
+`:api`.
+
+The following tools pull in additional third-party libraries:
+
+- **`:tools:grep`, `:tools:find`, `:tools:sed`, `:tools:jq`** — depend on
+  `:shared:regex`, which on JVM uses **re2j** (Google, Apache 2.0). RE2/J
+  is used in place of `java.util.regex` to guarantee linear-time matching
+  and avoid ReDoS on adversarial patterns.
+- **`:tools:jq`** — additionally uses **kotlinx-serialization-json**
+  (Apache 2.0) for JSON I/O.
+- **`:tools:python3`** — no third-party deps; defines the `PythonEngine`
+  SPI only.
+- **`:tools:python3-graalpy`** — JVM-only engine implementation backed by
+  **GraalPy** (`org.graalvm.polyglot:polyglot`, `:python`, and
+  `org.graalvm.python:python-embedding`, all v25.0.2), plus the
+  transitively-pulled GraalVM SDK / Truffle / shadowed runtime artifacts
+  (`org.graalvm.sdk:*`, `org.graalvm.truffle:*`, `org.graalvm.shadowed:*`).
+  All GraalVM Polyglot and GraalPy artifacts are distributed by Oracle
+  under the **Universal Permissive License v1.0 (UPL)**. GraalPy bundles
+  a Python runtime that includes components under their own licenses
+  (CPython / Python Software Foundation License, plus various
+  PSF-compatible licenses for stdlib modules). Only modules that depend
+  on `:tools:python3-graalpy` (currently `:kash-app` on JVM) ship these
+  libraries.
+- **`:tools:kash:git-jgit`** — JVM-only host driver that backs the
+  kash `git` tool against a real Eclipse JGit repository (in-memory or
+  on-disk). Depends on **Eclipse JGit** (`org.eclipse.jgit:org.eclipse.jgit`,
+  v7.6.0.202603022253-r). JGit is distributed by the Eclipse Foundation
+  under the **Eclipse Distribution License v1.0**, which is a verbatim
+  copy of the **3-clause BSD license** — Apache-2.0 compatible. Upstream:
+  https://github.com/eclipse-jgit/jgit. Only modules that depend on
+  `:tools:kash:git-jgit` ship this library; the core kash `git` tool
+  (`:tools:kash:git`) has zero JGit linkage and runs on every target
+  including wasmJs.
+- **`:tools:kash:git-http`** — common-source (JVM + wasmJs) host driver
+  that backs the kash `git` tool against any smart-HTTP-v0 git server
+  via `:shared:net`. Pure-Kotlin; no third-party Kotlin libraries beyond
+  what `:shared:net` already pulls in. Fetch-only in v1 (clone/fetch
+  works; push is rejected with a "no transport configured" message).
+- **`pako`** (npm) — JavaScript port of zlib used by `:tools:kash:git` on
+  wasmJs for loose-object and packfile deflate/inflate. Retained for git
+  specifically because pako exposes `strm.total_in` on its `Inflate`
+  class, which the pack-file parser needs to advance its read cursor;
+  fflate's maintainer closed the equivalent request as not-planned
+  (fflate#221). Dual-licensed **MIT AND Zlib** (both permissive,
+  Apache-2.0 compatible). Upstream: https://github.com/nodeca/pako.
+  Bundled by webpack into the wasm app artifact; pulled in via
+  `npm("pako", …)` from `tools/kash/git/build.gradle.kts`. JVM builds do
+  not depend on pako (they use `java.util.zip`).
+- **`fflate`** (npm) — pure-JavaScript deflate/inflate + ZIP archive
+  library used by `:tools:ext:gzip`, `:tools:ext:tar`, and
+  `:tools:ext:zip` on wasmJs. Licensed **MIT** (permissive, Apache-2.0
+  compatible). Upstream: https://github.com/101arrowz/fflate. Bundled by
+  webpack into the wasm app artifact; pulled in via `npm("fflate", …)`
+  from each tool's `build.gradle.kts`. JVM builds use `java.util.zip` /
+  Apache Commons Compress instead and do not depend on fflate.
+- **coi-serviceworker** (Guido Zuidhof and contributors) — small JavaScript
+  service worker vendored verbatim (v0.1.7) at
+  `kash-app-web/src/wasmJsMain/resources/coi-serviceworker.js`. It re-injects
+  the Cross-Origin-Opener-Policy / Cross-Origin-Embedder-Policy headers on
+  static hosts that can't set them (GitHub Pages), so the page becomes
+  cross-origin isolated and SharedArrayBuffer (the Pyodide-in-Worker stdin
+  pipe) is available. Licensed **MIT** (permissive, Apache-2.0 compatible).
+  Upstream: https://github.com/gzuidhof/coi-serviceworker. Shipped only in the
+  `:kash-app-web` wasmJs distribution; not used by JVM builds.
+
+### Test-only build tooling (not distributed)
+
+- **JUnit Jupiter** (EPL 2.0) — test runner, not shipped in release artifacts
+- **kotlinx-coroutines-test** (Apache 2.0) — used by tool unit tests
+- **kotlin-test** (`org.jetbrains.kotlin:kotlin-test`, Apache 2.0) — multiplatform assertion API used across `commonTest` source sets
+- **koin-test** (`io.insert-koin:koin-test`, Apache 2.0) — DI test helpers
+- **Build-time only (no runtime artifact, not redistributed):** Kotlin Gradle Plugin, kotlinx-serialization Gradle plugin, ktlint Gradle plugin, Koin compiler plugin, `com.strumenta:antlr-kotlin-gradle-plugin`
+
+## Test-Only Dependencies (Not Distributed)
+
+The following upstream projects are included as git submodules **for conformance testing only** and are **not shipped with Kash binaries**:
+
+### GNU Bash
+- **License**: GPLv3
+- **Location**: `external/bash/`
+- **Purpose**: Conformance test corpus (`external/bash/tests/`)
+- **Distribution**: Test-only, excluded from release artifacts
+
+### Modernish
+- **License**: ISC
+- **Location**: `external/modernish/`
+- **Purpose**: POSIX shell test suite (`external/modernish/lib/modernish/tst/`)
+- **Distribution**: Test-only, excluded from release artifacts
+
+### jq
+- **License**: MIT
+- **Location**: `external/jq/`
+- **Purpose**: JSON query language test suite (`external/jq/tests/`)
+- **Distribution**: Test-only, excluded from release artifacts
+
+### One True Awk (onetrueawk)
+- **License**: Permissive, BSD/MIT-style (Lucent Technologies, 1997). Full text:
+
+  > Copyright (C) Lucent Technologies 1997
+  > All Rights Reserved
+  >
+  > Permission to use, copy, modify, and distribute this software and
+  > its documentation for any purpose and without fee is hereby granted,
+  > provided that the above copyright notice appear in all copies and
+  > that both that the copyright notice and this permission notice and
+  > warranty disclaimer appear in supporting documentation, and that the
+  > name Lucent Technologies or any of its entities not be used in
+  > advertising or publicity pertaining to distribution of the software
+  > without specific, written prior permission.
+  >
+  > LUCENT DISCLAIMS ALL WARRANTIES WITH REGARD TO THIS SOFTWARE,
+  > INCLUDING ALL IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS. IN
+  > NO EVENT SHALL LUCENT OR ANY OF ITS ENTITIES BE LIABLE FOR ANY
+  > SPECIAL, INDIRECT OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES WHATSOEVER
+  > RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN ACTION OF
+  > CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF OR IN
+  > CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
+
+- **Location** (planned): `external/onetrueawk/` (git submodule from
+  https://github.com/onetrueawk/awk).
+- **Purpose**: Conformance test corpus (`external/onetrueawk/testdir/`)
+  and behavioral reference for the kash awk grammar in `:tools:awk`.
+- **Distribution**: Test-only, excluded from release artifacts. The kash
+  awk grammar (`tools/awk/src/commonMain/antlr/AwkParser.g4`) is re-derived
+  from POSIX behavior and validated against this corpus — yacc rules,
+  action blocks, and identifiers from `awkgram.y` are intentionally **not**
+  translated into our grammar, to keep the derivation clean. See
+  `tools/awk/src/commonMain/kotlin/com/accucodeai/kash/tools/awk/STATUS.md`
+  for the licensing posture and the list of explicitly off-limits
+  upstream sources (gawk, mawk, busybox awk — all GPL).
+
+## Important Notes
+
+- The **GPLv3 code in `external/bash/` is not included** in any distributed JAR, executable, or source release
+- Test fixtures are **development-only** and required only when running `./gradlew conformanceTest`
+- Production code in `src/commonMain` and `src/jvmMain` has **zero GPL dependencies**
+- Kash itself is licensed under **Apache 2.0**, fully compatible with its production dependencies

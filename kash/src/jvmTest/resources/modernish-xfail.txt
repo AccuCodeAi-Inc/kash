@@ -1,0 +1,2 @@
+# Modernish conformance xfail list — see bash-tests-xfail.txt for format.
+# All modernish tests are currently skipped pending harness wiring.

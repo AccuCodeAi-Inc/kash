@@ -1,0 +1,163 @@
+package com.accucodeai.kash.tools.posix
+
+import com.accucodeai.kash.api.CommandSpec
+import com.accucodeai.kash.tools.awk.awkCommands
+import com.accucodeai.kash.tools.basename.basenameCommands
+import com.accucodeai.kash.tools.bc.bcCommands
+import com.accucodeai.kash.tools.cal.calCommands
+import com.accucodeai.kash.tools.cat.catCommands
+import com.accucodeai.kash.tools.chmod.chmodCommands
+import com.accucodeai.kash.tools.cksum.cksumCommands
+import com.accucodeai.kash.tools.cmp.cmpCommands
+import com.accucodeai.kash.tools.comm.commCommands
+import com.accucodeai.kash.tools.cp.cpCommands
+import com.accucodeai.kash.tools.csplit.csplitCommands
+import com.accucodeai.kash.tools.cut.cutCommands
+import com.accucodeai.kash.tools.date.dateCommands
+import com.accucodeai.kash.tools.dd.ddCommands
+import com.accucodeai.kash.tools.df.dfCommands
+import com.accucodeai.kash.tools.diff.diffCommands
+import com.accucodeai.kash.tools.dirname.dirnameCommands
+import com.accucodeai.kash.tools.du.duCommands
+import com.accucodeai.kash.tools.echo.echoCommands
+import com.accucodeai.kash.tools.env.envCommands
+import com.accucodeai.kash.tools.expand.expandCommands
+import com.accucodeai.kash.tools.expr.exprCommands
+import com.accucodeai.kash.tools.file.fileCommands
+import com.accucodeai.kash.tools.find.findCommands
+import com.accucodeai.kash.tools.fold.foldCommands
+import com.accucodeai.kash.tools.getconf.getconfCommands
+import com.accucodeai.kash.tools.getopt.getoptCommands
+import com.accucodeai.kash.tools.grep.grepCommands
+import com.accucodeai.kash.tools.head.headCommands
+import com.accucodeai.kash.tools.id.idCommands
+import com.accucodeai.kash.tools.join.joinCommands
+import com.accucodeai.kash.tools.ln.lnCommands
+import com.accucodeai.kash.tools.logname.lognameCommands
+import com.accucodeai.kash.tools.ls.lsCommands
+import com.accucodeai.kash.tools.make.makeCommands
+import com.accucodeai.kash.tools.mkdir.mkdirCommands
+import com.accucodeai.kash.tools.mkfifo.mkfifoCommands
+import com.accucodeai.kash.tools.mv.mvCommands
+import com.accucodeai.kash.tools.nice.niceCommands
+import com.accucodeai.kash.tools.nl.nlCommands
+import com.accucodeai.kash.tools.nohup.nohupCommands
+import com.accucodeai.kash.tools.od.odCommands
+import com.accucodeai.kash.tools.paste.pasteCommands
+import com.accucodeai.kash.tools.patch.patchCommands
+import com.accucodeai.kash.tools.pathchk.pathchkCommands
+import com.accucodeai.kash.tools.pgrep.pgrepCommands
+import com.accucodeai.kash.tools.pkill.pkillCommands
+import com.accucodeai.kash.tools.posix.mktemp.mktempCommands
+import com.accucodeai.kash.tools.posix.stat.statCommands
+import com.accucodeai.kash.tools.printf.printfCommands
+import com.accucodeai.kash.tools.ps.psCommands
+import com.accucodeai.kash.tools.readlink.readlinkCommands
+import com.accucodeai.kash.tools.realpath.realpathCommands
+import com.accucodeai.kash.tools.rm.rmCommands
+import com.accucodeai.kash.tools.rmdir.rmdirCommands
+import com.accucodeai.kash.tools.sed.sedCommands
+import com.accucodeai.kash.tools.sh.shCommands
+import com.accucodeai.kash.tools.shuf.shufCommands
+import com.accucodeai.kash.tools.sleep.sleepCommands
+import com.accucodeai.kash.tools.sort.sortCommands
+import com.accucodeai.kash.tools.split.splitCommands
+import com.accucodeai.kash.tools.sum.sumCommands
+import com.accucodeai.kash.tools.tail.tailCommands
+import com.accucodeai.kash.tools.tee.teeCommands
+import com.accucodeai.kash.tools.test.testCommands
+import com.accucodeai.kash.tools.touch.touchCommands
+import com.accucodeai.kash.tools.tput.tputCommands
+import com.accucodeai.kash.tools.tr.trCommands
+import com.accucodeai.kash.tools.tree.treeCommands
+import com.accucodeai.kash.tools.truefalse.trueFalseCommands
+import com.accucodeai.kash.tools.tsort.tsortCommands
+import com.accucodeai.kash.tools.tty.ttyCommands
+import com.accucodeai.kash.tools.uname.unameCommands
+import com.accucodeai.kash.tools.unexpand.unexpandCommands
+import com.accucodeai.kash.tools.uniq.uniqCommands
+import com.accucodeai.kash.tools.wc.wcCommands
+import com.accucodeai.kash.tools.xargs.xargsCommands
+
+/**
+ * Every POSIX (XCU §4) tool kash ships, concatenated into one list. Picked
+ * up by [com.accucodeai.kash.KashCoreModule]'s registry composition.
+ */
+public val posixCommands: List<CommandSpec> =
+    awkCommands +
+        basenameCommands +
+        bcCommands +
+        calCommands +
+        catCommands +
+        chmodCommands +
+        cksumCommands +
+        cmpCommands +
+        commCommands +
+        cpCommands +
+        csplitCommands +
+        cutCommands +
+        dateCommands +
+        ddCommands +
+        dfCommands +
+        diffCommands +
+        dirnameCommands +
+        duCommands +
+        echoCommands +
+        envCommands +
+        expandCommands +
+        exprCommands +
+        fileCommands +
+        findCommands +
+        foldCommands +
+        getconfCommands +
+        getoptCommands +
+        grepCommands +
+        headCommands +
+        idCommands +
+        joinCommands +
+        lnCommands +
+        lognameCommands +
+        lsCommands +
+        makeCommands +
+        mkdirCommands +
+        mkfifoCommands +
+        mktempCommands +
+        mvCommands +
+        niceCommands +
+        nlCommands +
+        nohupCommands +
+        odCommands +
+        pasteCommands +
+        patchCommands +
+        pathchkCommands +
+        pgrepCommands +
+        pkillCommands +
+        printfCommands +
+        psCommands +
+        readlinkCommands +
+        realpathCommands +
+        rmCommands +
+        rmdirCommands +
+        sedCommands +
+        shCommands +
+        shufCommands +
+        sleepCommands +
+        sortCommands +
+        splitCommands +
+        statCommands +
+        sumCommands +
+        tailCommands +
+        teeCommands +
+        testCommands +
+        touchCommands +
+        tputCommands +
+        trCommands +
+        treeCommands +
+        trueFalseCommands +
+        tsortCommands +
+        ttyCommands +
+        unameCommands +
+        unexpandCommands +
+        uniqCommands +
+        wcCommands +
+        xargsCommands

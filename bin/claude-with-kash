@@ -1,0 +1,13 @@
+#!/bin/sh
+# Launch `claude` with kash shimmed in as `bash` — scoped to this process
+# tree only. When the session ends, the temp dir goes away and your real
+# bash is untouched.
+set -e
+
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+SHIM_DIR="$(mktemp -d -t kash-shim.XXXXXX)"
+trap 'rm -rf "$SHIM_DIR"' EXIT INT TERM
+
+ln -s "$ROOT/bin/kash" "$SHIM_DIR/bash"
+
+PATH="$SHIM_DIR:$PATH" SHELL="$SHIM_DIR/bash" exec claude "$@"

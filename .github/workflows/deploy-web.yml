@@ -1,0 +1,63 @@
+name: Deploy web app to GitHub Pages
+
+# Builds the :kash-app-web Kotlin/Wasm production bundle and publishes it to
+# GitHub Pages. Runs on version tags (v*) and on manual dispatch.
+#
+# One-time repo setup: Settings → Pages → Build and deployment → Source =
+# "GitHub Actions". Until that is set, the deploy job cannot publish.
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+# Least-privilege token plus the OIDC id-token the Pages deploy needs.
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# Serialize Pages deploys; don't cancel an in-flight publish.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        # external/* submodules are conformance-test corpora only and are not
+        # Gradle modules, so the web build does not need them.
+
+      - name: Set up JDK 25
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '25'
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v6
+
+      - name: Configure Pages
+        uses: actions/configure-pages@v5
+
+      - name: Build Wasm production bundle
+        run: ./gradlew :kash-app-web:wasmJsBrowserDistribution --no-daemon
+
+      # index.html sits at the root of this dir, so it becomes the Pages site root.
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: kash-app-web/build/dist/wasmJs/productionExecutable
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v5

@@ -1,0 +1,40 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Kash: Browser Terminal</title>
+    <!-- Cross-origin isolation for static hosts (e.g. GitHub Pages) that can't
+         set COOP/COEP response headers. This service worker re-injects them so
+         SharedArrayBuffer is available (the Pyodide-in-Worker stdin pipe needs
+         it; without isolation, interactive Python input() raises EOFError). It
+         reloads the page once on first load to take control, then is a no-op.
+         Must load before any script that touches SharedArrayBuffer, and must be
+         a classic <script> (it reads document.currentScript.src). The dev
+         server sets these headers directly, so this is harmless there. -->
+    <script src="coi-serviceworker.js"></script>
+    <style>
+        /* Lock the page to the viewport so Compose's canvas can claim 100vw/100vh
+           without browser chrome introducing a scrollbar. The body is the
+           ComposeViewport target — Compose injects a canvas child of its own. */
+        html, body {
+            margin: 0;
+            padding: 0;
+            width: 100%;
+            height: 100%;
+            overflow: hidden;
+            background: #0b0b0b;
+            font-family: ui-monospace, "SF Mono", "Cascadia Mono", Menlo, Consolas, monospace;
+        }
+    </style>
+</head>
+<body>
+<!-- Pyodide is self-hosted under ./pyodide/ — the Gradle bundlePyodide
+     task downloads and unpacks the release into wasmJsMain/resources.
+     The script exposes globalThis.loadPyodide; the wasmJs interop calls
+     it with indexURL='./pyodide/' so wasm + stdlib zip resolve locally.
+     Works offline; no CDN. -->
+<script src="pyodide/pyodide.js"></script>
+<script src="kash-app-web.js"></script>
+</body>
+</html>

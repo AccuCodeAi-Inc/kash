@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project version="4">
+  <component name="VcsDirectoryMappings">
+    <mapping directory="" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/external/bash" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/external/jq" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/external/modernish" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/external/onetrueawk" vcs="Git" />
+  </component>
+</project>

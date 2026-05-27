@@ -1,0 +1,13 @@
+#!/bin/sh
+# One-shot kash launcher. Resolves symlinks so it works when invoked via
+# the claude-with-kash shim (which symlinks this script as `bash`).
+SELF="$0"
+while [ -L "$SELF" ]; do
+    link="$(readlink "$SELF")"
+    case "$link" in
+        /*) SELF="$link" ;;
+        *)  SELF="$(dirname "$SELF")/$link" ;;
+    esac
+done
+ROOT="$(cd "$(dirname "$SELF")/.." && pwd)"
+exec "$ROOT/kash-app/build/install/kash-app-jvm/bin/kash-app" "$@"

@@ -1,0 +1,44 @@
+.gradle/
+build/
+**/build/
+!src/**/build/
+out/
+local.properties
+.kotlin/
+
+# AI-assistant agent working memory (internal dev notes; not for distribution)
+.claude/agent-memory/
+
+# IDE
+*.iml
+.idea/workspace.xml
+.idea/tasks.xml
+.idea/usage.statistics.xml
+.idea/dictionaries
+.idea/shelf
+.idea/caches
+.idea/libraries
+.idea/jarRepositories.xml
+.idea/compiler.xml
+.idea/inspectionProfiles
+.idea/discord.xml
+.idea/sonarlint
+.idea/artifacts
+
+# OS
+.DS_Store
+
+# Not having a good time?
+hs_err*.log
+
+# Kash snasoht
+.kash
+
+# Stray compiled class files (occasionally land at repo root from misconfigured runs)
+*.class
+/com/
+
+# Pyodide self-host bundle — fetched at build time, not source-controlled.
+kash-app-web/src/wasmJsMain/resources/pyodide/
+# Pyodide-in-Worker shim — copied from :tools:kash:python3-pyodide by copyPyodideWorker.
+kash-app-web/src/wasmJsMain/resources/pyodide-worker.js
