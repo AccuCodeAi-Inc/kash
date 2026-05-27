@@ -47,7 +47,7 @@ cryptographyKotlin = "0.6.0"
 # Vanniktech Maven Publish — wraps `maven-publish` + signing with KMP-aware
 # defaults (publishes the root multiplatform module + per-target artifacts,
 # auto-generates sources/javadoc jars). Apache-2.0.
-vanniktechMavenPublish = "0.30.0"
+vanniktechMavenPublish = "0.34.0"
 
 [libraries]
 kotlinGradlePlugin = { module = "org.jetbrains.kotlin:kotlin-gradle-plugin", version.ref = "kotlin" }
