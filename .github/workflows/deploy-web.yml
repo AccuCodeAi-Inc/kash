@@ -1,14 +1,18 @@
 name: Deploy web app to GitHub Pages
 
 # Builds the :kash-app-web Kotlin/Wasm production bundle and publishes it to
-# GitHub Pages. Runs on version tags (v*) and on manual dispatch.
+# GitHub Pages. Runs on every push to main and on manual dispatch.
+#
+# Deploys from main because the auto-created "github-pages" environment only
+# allows the default branch to deploy by default — tag deploys are rejected by
+# its protection rule.
 #
 # One-time repo setup: Settings → Pages → Build and deployment → Source =
 # "GitHub Actions". Until that is set, the deploy job cannot publish.
 
 on:
   push:
-    tags: ['v*']
+    branches: [main]
   workflow_dispatch:
 
 # Least-privilege token plus the OIDC id-token the Pages deploy needs.
