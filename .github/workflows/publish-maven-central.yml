@@ -36,6 +36,9 @@ jobs:
     # Only on a push to main (tag pushes have ref refs/tags/*, not this).
     if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
+    # Credentials live in the "release" environment's secrets; a job can only
+    # read environment-scoped secrets when it declares the environment.
+    environment: release
     env:
       ORG_GRADLE_PROJECT_mavenCentralUsername: ${{ secrets.MAVEN_CENTRAL_USERNAME }}
       ORG_GRADLE_PROJECT_mavenCentralPassword: ${{ secrets.MAVEN_CENTRAL_PASSWORD }}
@@ -58,6 +61,11 @@ jobs:
     # Only on a v* tag push.
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
+    # The credentials and GPG signing key are stored as secrets in the
+    # "release" environment. A job can only read environment-scoped secrets
+    # when it declares that environment; without this line secrets.* resolve to
+    # empty strings and signing fails with "Could not read PGP secret key".
+    environment: release
     env:
       ORG_GRADLE_PROJECT_mavenCentralUsername: ${{ secrets.MAVEN_CENTRAL_USERNAME }}
       ORG_GRADLE_PROJECT_mavenCentralPassword: ${{ secrets.MAVEN_CENTRAL_PASSWORD }}
