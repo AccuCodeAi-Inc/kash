@@ -11,6 +11,7 @@ import com.accucodeai.kash.fs.FileSystem
 import com.accucodeai.kash.fs.Paths
 import com.accucodeai.kash.tools.python3.PythonEngine
 import com.accucodeai.kash.tools.python3.PythonSource
+import com.accucodeai.kash.tools.python3.pyodide.worker.PyodideErrorPolicy
 import com.accucodeai.kash.tools.python3.pyodide.worker.PyodideWorkerClient
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -170,9 +171,10 @@ public class PyodideEngine : PythonEngine {
                 stderr.writeBytes("python3: execution timed out after ${timeoutMillis}ms\n".encodeToByteArray())
                 124
             } catch (e: Throwable) {
-                val msg = e.message
-                if (!msg.isNullOrBlank()) stderr.writeBytes((msg + "\n").encodeToByteArray())
-                extractSystemExitCode(msg) ?: 1
+                PyodideErrorPolicy.stderrTextForError(e.message)?.let {
+                    stderr.writeBytes(it.encodeToByteArray())
+                }
+                PyodideErrorPolicy.extractSystemExitCode(e.message) ?: 1
             }
         }
 
@@ -194,11 +196,10 @@ public class PyodideEngine : PythonEngine {
             stderr.writeBytes("python3: execution timed out after ${timeoutMillis}ms\n".encodeToByteArray())
             124
         } catch (e: Throwable) {
-            val msg = e.message
-            if (!msg.isNullOrBlank()) {
-                stderr.writeBytes((msg + "\n").encodeToByteArray())
+            PyodideErrorPolicy.stderrTextForError(e.message)?.let {
+                stderr.writeBytes(it.encodeToByteArray())
             }
-            extractSystemExitCode(msg) ?: 1
+            PyodideErrorPolicy.extractSystemExitCode(e.message) ?: 1
         }
     }
 
@@ -448,16 +449,10 @@ public class PyodideEngine : PythonEngine {
          * Pyodide formats `SystemExit` traceback messages as `SystemExit: N`.
          * Parse the integer so an explicit `sys.exit(N)` is reflected in the
          * kash exit code instead of being lumped into the generic-uncaught
-         * exit `1`.
+         * exit `1`. Delegates to [PyodideErrorPolicy] so the worker path and
+         * the in-process path agree on the rule.
          */
-        internal fun extractSystemExitCode(msg: String?): Int? {
-            if (msg == null) return null
-            val marker = "SystemExit: "
-            val i = msg.lastIndexOf(marker)
-            if (i < 0) return null
-            val rest = msg.substring(i + marker.length).trimEnd()
-            return rest.toIntOrNull()
-        }
+        internal fun extractSystemExitCode(msg: String?): Int? = PyodideErrorPolicy.extractSystemExitCode(msg)
 
         /**
          * Python source executed once at REPL boot. Overrides

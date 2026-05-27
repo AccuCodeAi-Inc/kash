@@ -1,4 +1,4 @@
-@file:OptIn(kotlin.js.ExperimentalWasmJsInterop::class, kotlinx.coroutines.DelicateCoroutinesApi::class)
+@file:OptIn(kotlin.js.ExperimentalWasmJsInterop::class)
 
 package com.accucodeai.kash.tools.python3.pyodide.worker
 
@@ -10,7 +10,6 @@ import com.accucodeai.kash.fs.Paths
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.GlobalScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
@@ -56,6 +55,16 @@ internal class PyodideWorkerClient(
     /** Pump-job that copies kash stdin into the SAB ring. */
     private var stdinPump: Job? = null
 
+    /**
+     * Tail of the serialized output-write chain for the in-flight run. Each
+     * `out`/`err` chunk (and the final captured `errorMessage`) appends a
+     * launch that first joins its predecessor, so writes land on the sinks in
+     * worker-emit order despite running as separate coroutines. `run-result`
+     * joins this tail before completing the run, giving us a drain barrier so
+     * no output is lost or reordered relative to the returned exit code.
+     */
+    private var writeChain: Job? = null
+
     /** Scope for our internal pumps; cancelled at [shutdown]. */
     private val scope: CoroutineScope =
         CoroutineScope(SupervisorJob() + Dispatchers.Default)
@@ -82,6 +91,7 @@ internal class PyodideWorkerClient(
 
         currentStdout = stdout
         currentStderr = stderr
+        writeChain = null
         val deferred = CompletableDeferred<Int>()
         runDeferred = deferred
 
@@ -109,6 +119,7 @@ internal class PyodideWorkerClient(
             currentStdout = null
             currentStderr = null
             runDeferred = null
+            writeChain = null
         }
     }
 
@@ -137,6 +148,7 @@ internal class PyodideWorkerClient(
         stdinPump = null
         currentStdout = null
         currentStderr = null
+        writeChain = null
         runDeferred?.cancel()
         runDeferred = null
         scope.cancel()
@@ -194,19 +206,57 @@ internal class PyodideWorkerClient(
             "out" -> {
                 val bytes = readMsgBytes(data) ?: return
                 val sink = currentStdout ?: return
-                GlobalScope.launch(Dispatchers.Default) { sink.writeBytes(bytes) }
+                enqueueWrite(sink, bytes)
             }
 
             "err" -> {
                 val bytes = readMsgBytes(data) ?: return
                 val sink = currentStderr ?: return
-                GlobalScope.launch(Dispatchers.Default) { sink.writeBytes(bytes) }
+                enqueueWrite(sink, bytes)
             }
 
             "run-result" -> {
-                runDeferred?.complete(readMsgExitCode(data))
+                val exitCode = readMsgExitCode(data)
+                // Surface an uncaught Python exception's traceback. Pyodide
+                // raises it to the worker's JS catch rather than echoing it
+                // through setStderr, so this `errorMessage` field is the only
+                // carrier — drop it and the user gets a bare non-zero exit with
+                // no diagnostics. Suppression of clean `sys.exit(N)` lives in
+                // PyodideErrorPolicy.
+                val errText = PyodideErrorPolicy.stderrTextForError(readMsgErrorMessage(data))
+                val stderrSink = currentStderr
+                if (errText != null && stderrSink != null) {
+                    enqueueWrite(stderrSink, errText.encodeToByteArray())
+                }
+                // Drain barrier: only complete the run once every queued write
+                // (including the error text above) has landed on its sink, so
+                // the exit code never races ahead of the output.
+                val tail = writeChain
+                val deferred = runDeferred
+                scope.launch {
+                    tail?.join()
+                    deferred?.complete(exitCode)
+                }
             }
         }
+    }
+
+    /**
+     * Append [bytes] to the serialized [writeChain] so output lands on [sink]
+     * in worker-emit order. Each link joins its predecessor before writing;
+     * `run-result` joins the tail as a drain barrier. Single-threaded wasmJs
+     * means no lock is needed to mutate [writeChain] here.
+     */
+    private fun enqueueWrite(
+        sink: SuspendSink,
+        bytes: ByteArray,
+    ) {
+        val prev = writeChain
+        writeChain =
+            scope.launch {
+                prev?.join()
+                sink.writeBytes(bytes)
+            }
     }
 
     private suspend fun pumpStdin(
@@ -278,6 +328,21 @@ internal fun fsFileMsg(
 private fun readMsgType(data: JsAny): String = jsReadStringProp(data, "type")
 
 private fun readMsgExitCode(data: JsAny): Int = jsReadIntProp(data, "exitCode")
+
+/**
+ * Read the optional `errorMessage` field off a `run-result`. Returns null when
+ * the field is absent/null/undefined (the success case) so we don't coerce it
+ * to the literal string "null" via `String(...)`.
+ */
+private fun readMsgErrorMessage(data: JsAny): String? {
+    if (!jsHasNonNullProp(data, "errorMessage")) return null
+    return jsReadStringProp(data, "errorMessage")
+}
+
+private fun jsHasNonNullProp(
+    obj: JsAny,
+    name: String,
+): Boolean = js("(obj[name] !== null && obj[name] !== undefined)")
 
 private fun readMsgBytes(data: JsAny): ByteArray? {
     val len = jsReadByteArrayLen(data, "bytes")
