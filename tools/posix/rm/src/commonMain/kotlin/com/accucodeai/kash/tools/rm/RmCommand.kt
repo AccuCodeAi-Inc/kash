@@ -7,6 +7,7 @@ import com.accucodeai.kash.api.CommandResult
 import com.accucodeai.kash.api.CommandSpec
 import com.accucodeai.kash.api.CommandTag
 import com.accucodeai.kash.api.io.writeUtf8
+import com.accucodeai.kash.fs.FileType
 import com.accucodeai.kash.fs.Paths
 
 /**
@@ -152,7 +153,13 @@ public class RmCommand :
                 anyError = true
                 continue
             }
-            val isDir = ctx.process.fs.isDirectory(abs)
+            // A symlink is removed by unlinking the link itself — never
+            // followed, even with -r. Real rm decides this with lstat, so a
+            // symlink to a directory (or a loop like /proc/<pid>/cwd -> /) is
+            // a leaf, not something to recurse into. Treating it as a
+            // directory here would follow the chain and, on a self-referential
+            // link, walk forever (proc/2/cwd/proc/2/cwd/...).
+            val isDir = !isSymlink(ctx, abs) && ctx.process.fs.isDirectory(abs)
             if (isDir) {
                 if (recursive) {
                     if (!removeRecursive(ctx, operand, abs)) anyError = true
@@ -203,7 +210,11 @@ public class RmCommand :
         abs: String,
     ): Boolean {
         var ok = true
-        if (ctx.process.fs.isDirectory(abs)) {
+        // Recurse only into *real* directories. A symlink (even one pointing
+        // at a directory) is unlinked as a leaf below — following it would
+        // delete the target's contents, and a loop like /proc/<pid>/cwd -> /
+        // would recurse without bound. This is why real rm walks with lstat.
+        if (!isSymlink(ctx, abs) && ctx.process.fs.isDirectory(abs)) {
             val entries =
                 try {
                     ctx.process.fs.list(abs)
@@ -225,4 +236,23 @@ public class RmCommand :
         }
         return ok
     }
+
+    /**
+     * lstat-style check: is the leaf at [abs] a symlink? Used to keep the
+     * recursive walk from following links into their targets (the `rm`
+     * contract — `fs.remove` unlinks the link, not the target). Any stat
+     * failure is reported as "not a symlink" so the caller falls through to
+     * its normal directory/file handling and surfaces the real error there.
+     */
+    private fun isSymlink(
+        ctx: CommandContext,
+        abs: String,
+    ): Boolean =
+        try {
+            ctx.process.fs
+                .statLink(abs)
+                .type == FileType.SYMLINK
+        } catch (_: Exception) {
+            false
+        }
 }

@@ -2,7 +2,11 @@ package com.accucodeai.kash.tools.rm
 
 import com.accucodeai.kash.api.io.asSuspendSink
 import com.accucodeai.kash.api.io.asSuspendSource
+import com.accucodeai.kash.fs.FileSystem
+import com.accucodeai.kash.fs.FsLabel
 import com.accucodeai.kash.fs.InMemoryFs
+import com.accucodeai.kash.fs.Mount
+import com.accucodeai.kash.fs.MountedFileSystem
 import com.accucodeai.kash.test.bareCommandContext
 import kotlinx.coroutines.test.runTest
 import kotlinx.io.Buffer
@@ -13,7 +17,7 @@ import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 
 private suspend fun runRm(
-    fs: InMemoryFs,
+    fs: FileSystem,
     cwd: String = "/",
     vararg args: String,
 ): Triple<Int, String, String> {
@@ -213,5 +217,71 @@ class RmCommandTest {
             val (rc, _, _) = runRm(fs, args = arrayOf("-r", "/tmp/empty1"))
             assertEquals(0, rc)
             assertFalse(fs.exists("/tmp/empty1"))
+        }
+
+    // --- Symlinks are leaves: rm unlinks the link, never recurses through
+    // it (the lstat contract). Regression for the proc-cwd loop where
+    // following /proc/<pid>/cwd -> / re-entered /proc forever, blowing up
+    // into proc/2/cwd/proc/2/cwd/... ---
+
+    @Test fun recursiveUnlinksSymlinkWithoutTouchingTarget() =
+        runTest {
+            val fs = InMemoryFs()
+            // A directory tree whose only child is a symlink to an
+            // out-of-tree directory with real contents.
+            fs.mkdirs("/victim")
+            fs.writeBytes("/victim/precious", "keep me".encodeToByteArray())
+            fs.mkdirs("/tmp/d")
+            fs.createSymlink("/tmp/d/link", "/victim")
+
+            val (rc, _, err) = runRm(fs, args = arrayOf("-r", "/tmp/d"))
+
+            assertEquals(0, rc, err)
+            assertFalse(fs.exists("/tmp/d"), "tree should be removed")
+            // The symlink target and its contents must survive — rm must
+            // have unlinked the link, not descended into /victim.
+            assertTrue(fs.isDirectory("/victim"), "symlink target deleted!")
+            assertTrue(fs.exists("/victim/precious"), "target contents deleted!")
+        }
+
+    @Test fun recursiveDoesNotFollowSelfReferentialSymlinkLoop() =
+        runTest {
+            // Mirror /proc/<pid>/cwd -> a directory that contains the link:
+            // a read-only mount with `self` pointing back at its own parent.
+            // Pre-fix, rm followed the link and recursed forever, producing
+            // paths like .../self/self/self/... and a read-only error per
+            // level until SYMLOOP_MAX tripped.
+            val ro = InMemoryFs()
+            ro.mkdirs("/d")
+            ro.createSymlink("/d/self", "/ro/d")
+            val mfs =
+                MountedFileSystem(
+                    listOf(
+                        Mount("/", InMemoryFs(), FsLabel.USER),
+                        Mount("/ro", ro, FsLabel.USER, readOnly = true),
+                    ),
+                )
+
+            val (rc, _, err) = runRm(mfs, args = arrayOf("-rf", "/ro/d"))
+
+            // Read-only mount: removal can't succeed, but the walk must be
+            // bounded — it treats `self` as a leaf and never builds the
+            // pathological repeated path.
+            assertEquals(1, rc)
+            assertFalse("self/self" in err, "rm recursed through the symlink loop:\n$err")
+            assertTrue("self" in err, "expected an error about the symlink leaf:\n$err")
+        }
+
+    @Test fun symlinkOperandRemovedNotFollowed() =
+        runTest {
+            // `rm <symlink-to-dir>` (no -r) removes the link itself — it is
+            // not "Is a directory", because lstat sees a symlink.
+            val fs = InMemoryFs()
+            fs.mkdirs("/realdir")
+            fs.createSymlink("/link", "/realdir")
+            val (rc, _, err) = runRm(fs, args = arrayOf("/link"))
+            assertEquals(0, rc, err)
+            assertFalse(fs.exists("/link"), "symlink should be unlinked")
+            assertTrue(fs.isDirectory("/realdir"), "target must survive")
         }
 }
