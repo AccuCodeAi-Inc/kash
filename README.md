@@ -1,7 +1,5 @@
 # Kash
 
-Bash on Kotlin
-
 [![Maven Central Version](https://img.shields.io/maven-central/v/com.accucodeai.kash/kash?label=Kash)](https://central.sonatype.com/artifact/com.accucodeai.kash/kash)
 [![Maven Central Version](https://img.shields.io/maven-central/v/com.accucodeai.kash/api?label=API)](https://central.sonatype.com/artifact/com.accucodeai.kash/api)
 [![Maven Central Version](https://img.shields.io/maven-central/v/com.accucodeai.kash/corevm?label=CoreVM)](https://central.sonatype.com/artifact/com.accucodeai.kash/corevm)
@@ -20,9 +18,17 @@ on the JVM and WASM.
 
 Is it a VM? An emulator? Not exactly. All of Kash runs directly on the machine with 0(ish) virtualization.
 
-## Where's my REPL?
+## Play with the REPL
 
-Run `kash-app` direct in terminal. Do not use jvmRun task.
+Kash has 2 REPL apps to help test and play with it.
+
+### In the browser
+
+https://accucodeai-inc.github.io/kash/
+
+### In your terminal
+
+Run `kash-app` direct in terminal. Do not use the jvmRun task.
 ```
 ./gradlew :kash-app:installJvmDist
 ./kash-app/build/install/kash-app-jvm/bin/kash-app
