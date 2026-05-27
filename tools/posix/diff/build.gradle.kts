@@ -2,6 +2,9 @@ plugins {
     id("kash.kmp")
 }
 
+description =
+    "kash `diff` — compare files line-by-line, producing normal, unified, context, or ed-script output, with whitespace-folding options and recursive directory comparison."
+
 kotlin {
     sourceSets {
         commonMain.dependencies {

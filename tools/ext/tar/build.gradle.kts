@@ -2,6 +2,9 @@ plugins {
     id("kash.kmp")
 }
 
+description =
+    "kash `tar` — create, extract, and list ustar archives with gzip/bzip2/xz filter support (Commons Compress on JVM, fflate on Wasm)."
+
 kotlin {
     sourceSets {
         commonMain.dependencies {

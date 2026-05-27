@@ -2,6 +2,9 @@ plugins {
     id("kash.kmp")
 }
 
+description =
+    "kash `python3` — SPI and shell command for Python 3 execution in kash; requires a platform-specific engine module (python3-graalpy on JVM, python3-pyodide on Wasm)."
+
 kotlin {
     sourceSets {
         commonMain.dependencies {

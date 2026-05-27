@@ -2,6 +2,9 @@ plugins {
     id("kash.kmp")
 }
 
+description =
+    "kash `git` smart-HTTP transport — multiplatform git-upload-pack/receive-pack over HTTP(S) for the kash git client."
+
 kotlin {
     sourceSets {
         commonMain.dependencies {

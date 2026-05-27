@@ -3,6 +3,9 @@ plugins {
     id("kash.conformance")
 }
 
+description =
+    "kash — the embeddable bash-compatible shell VM: `Kash` host, `Session`, interpreter, parser, POSIX/ext/kash tool catalog, and the bash conformance test harness."
+
 kotlin {
     sourceSets {
         commonMain.dependencies {

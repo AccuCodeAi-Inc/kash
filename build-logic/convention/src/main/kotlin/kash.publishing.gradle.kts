@@ -28,6 +28,22 @@ group = kashGroupId
 // `:api` -> `api`. Mirrors what the source layout already implies.
 val artifactName = project.path.removePrefix(":").replace(":", ".")
 
+// Fallback POM <description>, used only when a module doesn't set its own
+// `description` in its build script. Derived from the module path so even
+// un-annotated modules get a readable, per-artifact blurb on Maven Central.
+// `:tools:posix:cat`  -> "kash `cat` (tools.posix) — part of kash, …"
+// `:api`              -> "kash `api` — part of kash, …"
+val derivedDescription =
+    buildString {
+        append("kash `").append(project.name).append("`")
+        val moduleGroup = artifactName.substringBeforeLast('.', "")
+        if (moduleGroup.isNotEmpty()) append(" (").append(moduleGroup).append(")")
+        append(
+            " — part of kash, a Kotlin Multiplatform, UTF-8, " +
+                "bash-compatible shell and tool suite.",
+        )
+    }
+
 extensions.configure<MavenPublishBaseExtension> {
     // Publish to the Sonatype Central Portal (https://central.sonatype.com).
     publishToMavenCentral(automaticRelease = true)
@@ -40,6 +56,13 @@ extensions.configure<MavenPublishBaseExtension> {
     )
 
     pom {
+        // Maven Central rejects releases whose POM lacks <name> or
+        // <description>. Each of the ~138 modules publishes its own POM, so
+        // both are derived from the module path; a module may override the
+        // blurb by setting its own `description` in its build script (read
+        // lazily so a later assignment still wins).
+        name.set("kash $artifactName")
+        description.set(provider { project.description ?: derivedDescription })
         url.set("https://github.com/AccuCodeAi-Inc/Kash")
         licenses {
             license {

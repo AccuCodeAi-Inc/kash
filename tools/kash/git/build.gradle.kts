@@ -2,6 +2,9 @@ plugins {
     id("kash.kmp")
 }
 
+description =
+    "kash `git` — a multiplatform pure-Kotlin git client (clone, fetch, log, diff, commit, and more) for the kash shell."
+
 kotlin {
     sourceSets {
         commonMain.dependencies {

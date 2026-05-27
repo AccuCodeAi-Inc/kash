@@ -5,6 +5,9 @@ plugins {
     id("kash.kmp-wasm-app")
 }
 
+description =
+    "kash browser app — the Kotlin/Wasm + Compose Multiplatform terminal UI that runs kash in the browser, bundling Pyodide, git-over-HTTP, and AI tools."
+
 // -----------------------------------------------------------------------------
 // Pyodide self-host bundle.
 //

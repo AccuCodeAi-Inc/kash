@@ -2,6 +2,9 @@ plugins {
     id("kash.kmp")
 }
 
+description =
+    "kash core API — `Command`, `CommandSpec`, `CommandRegistry`, `KashMachine`, `KashProcess`, `FileSystem`, and the streaming async-pipe IO that every kash tool builds on."
+
 kotlin {
     sourceSets {
         commonMain.dependencies {

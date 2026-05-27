@@ -2,6 +2,9 @@ plugins {
     id("kash.kmp")
 }
 
+description =
+    "kash core VM — default implementations of the :api interfaces: `DefaultKashMachine`, `DefaultKashProcess`, `InMemoryFs`, `MountedFileSystem`, `ToolsFs`, and machine snapshot/restore."
+
 kotlin {
     sourceSets {
         commonMain.dependencies {

@@ -2,6 +2,9 @@ plugins {
     id("kash.kmp")
 }
 
+description =
+    "kash shared test scaffolding — `bareCommandContext`, `NullFs`, `FakeFs`, and re-exported `kotlinx-coroutines-test` for use across all tool unit tests."
+
 kotlin {
     sourceSets {
         commonMain.dependencies {

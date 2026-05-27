@@ -2,6 +2,8 @@ plugins {
     id("kash.kmp")
 }
 
+description = "kash `fzf` — a multiplatform pure-Kotlin fuzzy-finder TUI command for the kash shell."
+
 kotlin {
     sourceSets {
         commonMain.dependencies {

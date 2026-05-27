@@ -4,7 +4,7 @@ Bash on Kotlin
 
 ## What is Kash?
 
-Kash is POSIX userland environment with over 170 tools directly implemented in Kotlin. It runs
+Kash is POSIX userland environment with over 120 tools directly implemented in Kotlin. It runs
 on the JVM and WASM.
 
 Is it a VM? An emulator? Not exactly. All of Kash runs directly on the machine with 0(ish) virtualization.

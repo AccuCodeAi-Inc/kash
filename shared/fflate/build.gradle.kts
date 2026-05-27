@@ -2,6 +2,9 @@ plugins {
     id("kash.kmp")
 }
 
+description =
+    "kash shared fflate interop — Kotlin/Wasm bindings and byte-marshaling helpers for the `fflate` npm compression library, shared by the gzip, tar, and zip tools."
+
 // Shared wasmJs interop for the `fflate` npm package (MIT) plus the
 // byte<->JS marshaling helpers its callers need. Centralizes what was
 // duplicated across :tools:ext:{gzip,tar,zip}. `api(npm(...))` so the

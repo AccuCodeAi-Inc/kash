@@ -2,6 +2,9 @@ plugins {
     id("kash.kmp")
 }
 
+description =
+    "kash shared net — multiplatform HTTP client abstraction (`KashKtorClient`) backed by Ktor-CIO on JVM and the browser `fetch` API on Kotlin/Wasm."
+
 kotlin {
     sourceSets {
         commonMain.dependencies {

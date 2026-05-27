@@ -2,6 +2,9 @@ plugins {
     id("kash.kmp")
 }
 
+description =
+    "kash ext-module — aggregate module that re-exports all non-POSIX extended tools (compression, archive, terminal, network, encoding, and misc utilities) as a single dependency."
+
 kotlin {
     sourceSets {
         commonMain.dependencies {

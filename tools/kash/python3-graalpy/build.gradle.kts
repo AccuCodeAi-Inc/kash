@@ -2,6 +2,9 @@ plugins {
     id("kash.kmp")
 }
 
+description =
+    "kash `python3` GraalPy engine — JVM backend for kash python3 that runs Python via GraalVM Polyglot/GraalPy with a virtual filesystem adapter."
+
 kotlin {
     sourceSets {
         commonMain.dependencies {

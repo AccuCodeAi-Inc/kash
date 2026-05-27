@@ -2,6 +2,9 @@ plugins {
     id("kash.kmp")
 }
 
+description =
+    "kash forensics aggregator — Koin registration module that bundles `binwalk`, `openssl`, `strings`, and `xxd` into the default kash command catalog."
+
 kotlin {
     sourceSets {
         commonMain.dependencies {

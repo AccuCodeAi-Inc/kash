@@ -2,6 +2,8 @@ plugins {
     id("kash.kmp")
 }
 
+description = "kash `ed` — a multiplatform pure-Kotlin implementation of the POSIX line editor for the kash shell."
+
 kotlin {
     sourceSets {
         commonMain.dependencies {

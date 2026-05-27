@@ -2,6 +2,9 @@ plugins {
     id("kash.kmp")
 }
 
+description =
+    "kash shared hash — multiplatform MD5/SHA-1/SHA-2 digest API (`Digest`, `Sha1`) backed by `java.security.MessageDigest` on JVM and `kotlincrypto` on Kotlin/Wasm."
+
 kotlin {
     sourceSets {
         commonMain.dependencies {

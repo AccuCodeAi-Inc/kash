@@ -4,6 +4,9 @@ plugins {
     id("kash.kmp-jvm-app")
 }
 
+description =
+    "kash JVM CLI — the native-terminal REPL binary that wires Posix raw-mode terminal control, JGit, GraalPy, and AI tools into a runnable kash shell application."
+
 kotlin {
     @OptIn(ExperimentalKotlinGradlePluginApi::class)
     jvm {

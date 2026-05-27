@@ -2,6 +2,9 @@ plugins {
     id("kash.kmp")
 }
 
+description =
+    "kash `posix-module` — aggregates every POSIX XCU tool kash ships into a single `posixCommands` list for registry composition."
+
 kotlin {
     sourceSets {
         commonMain.dependencies {

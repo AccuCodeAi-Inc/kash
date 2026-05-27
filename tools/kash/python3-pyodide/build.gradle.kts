@@ -2,6 +2,9 @@ plugins {
     id("kash.kmp")
 }
 
+description =
+    "kash `python3` Pyodide engine — Kotlin/Wasm backend for kash python3 that drives Pyodide (CPython compiled to WebAssembly) via a dedicated Web Worker."
+
 kotlin {
     sourceSets {
         commonMain.dependencies {

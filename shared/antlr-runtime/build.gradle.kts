@@ -2,6 +2,9 @@ plugins {
     id("kash.kmp")
 }
 
+description =
+    "kash shared ANTLR runtime — re-exports `antlr-kotlin-runtime` and bundles common parser utilities (`TwoStageParse`, `ThrowingErrorListener`, `RecognitionDiagnostics`) used by all kash grammars."
+
 kotlin {
     sourceSets {
         commonMain.dependencies {

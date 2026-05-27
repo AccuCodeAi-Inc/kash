@@ -2,6 +2,9 @@ plugins {
     id("kash.kmp")
 }
 
+description =
+    "kash `git` JGit host driver — JVM-only adapter that backs the kash git client with Eclipse JGit for transport and object storage."
+
 kotlin {
     sourceSets {
         commonMain.dependencies {

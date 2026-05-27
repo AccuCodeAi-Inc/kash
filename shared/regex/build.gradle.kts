@@ -2,6 +2,9 @@ plugins {
     id("kash.kmp")
 }
 
+description =
+    "kash shared regex — multiplatform `LinearRegex` abstraction backed by RE2/J on JVM (guaranteed linear-time, ReDoS-safe) and the JS `RegExp` engine on Kotlin/Wasm."
+
 kotlin {
     sourceSets {
         jvmMain.dependencies {

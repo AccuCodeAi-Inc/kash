@@ -2,6 +2,9 @@ plugins {
     id("kash.kmp")
 }
 
+description =
+    "kash `gzip` — compress and decompress gzip streams (including `gunzip` and `zcat` entry points), backed by fflate on Wasm and java.util.zip on JVM."
+
 kotlin {
     sourceSets {
         commonMain.dependencies {

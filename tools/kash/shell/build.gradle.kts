@@ -3,6 +3,9 @@ plugins {
     id("kash.antlr")
 }
 
+description =
+    "kash `shell` — the multiplatform bash-compatible shell interpreter (ANTLR parser, coroutine-based executor, pipelines, redirections, arithmetic, and POSIX builtins)."
+
 kashAntlr {
     packageName.set("com.accucodeai.kash.parser.antlr")
 }

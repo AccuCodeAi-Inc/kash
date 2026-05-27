@@ -2,6 +2,9 @@ plugins {
     id("kash.kmp")
 }
 
+description =
+    "kash module — aggregates the kash shell and all bundled tools (git, jq, nano, vi, less, fzf, ed) into a single command catalog."
+
 kotlin {
     sourceSets {
         commonMain.dependencies {

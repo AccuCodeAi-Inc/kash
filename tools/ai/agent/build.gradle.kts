@@ -2,6 +2,9 @@ plugins {
     id("kash.kmp")
 }
 
+description =
+    "kash `agent` — interactive LLM agent with shell tool access, backed by the JetBrains Koog framework and any OpenAI-compatible endpoint (LM Studio, Ollama, OpenRouter)."
+
 kotlin {
     sourceSets {
         commonMain.dependencies {
