@@ -9,7 +9,6 @@ import ai.koog.agents.core.dsl.extension.HistoryCompressionStrategy
 import ai.koog.agents.core.dsl.extension.ReceivedToolResults
 import ai.koog.agents.core.dsl.extension.nodeExecuteTools
 import ai.koog.agents.core.dsl.extension.nodeLLMCompressHistory
-import ai.koog.agents.core.dsl.extension.nodeLLMSendToolResults
 import ai.koog.agents.core.dsl.extension.onTextMessage
 import ai.koog.agents.core.dsl.extension.onToolCalls
 import ai.koog.agents.features.eventHandler.feature.EventHandler
@@ -786,7 +785,7 @@ internal class AgentSession(
         }
         val base =
             if (toolCalls.isNotEmpty()) {
-                frames.toMessageResponse()
+                frames.repairToolCallArgs().toMessageResponse()
             } else {
                 // Carry the model's real finish reason so isBlankReply can key
                 // off the documented "stop with empty content" signal. LM Studio
@@ -800,6 +799,35 @@ internal class AgentSession(
         appendPrompt { message(assistant) }
         return assistant
     }
+
+    /**
+     * Default any malformed tool-call arguments to an empty object before Koog
+     * assembles the message.
+     *
+     * Koog 1.0's [toMessageResponse] does an UNGUARDED
+     * `Json.parseToJsonElement(content).jsonObject` on every
+     * [StreamFrame.ToolCallComplete] (see `StreamFrameExt`). Small local models
+     * (Gemma via LM Studio especially, often right after a tool returned binary
+     * garbage) routinely emit a tool call with an EMPTY — or otherwise
+     * non-object — `arguments` string. That parse then throws "unexpected end of
+     * the input at path: $", which propagates out of [streamAssistant], kills
+     * the whole agent subgraph, and aborts the HTTP stream (the "Client
+     * disconnected" LM Studio logs). Rewriting the offending frame's content to
+     * `{}` lets assembly succeed; the tool's own arg-decoding then fails
+     * *gracefully* as a recoverable tool-result Failure (caught by Koog's
+     * `GenericAgentEnvironment`), so the model gets an error it can retry from
+     * instead of the loop dying. Conservative: only frames whose content does
+     * not already parse to a JSON object are touched. Remove if Koog guards the
+     * parse upstream.
+     */
+    private fun List<StreamFrame>.repairToolCallArgs(): List<StreamFrame> =
+        map { frame ->
+            if (frame is StreamFrame.ToolCallComplete && frame.contentJsonResult.isFailure) {
+                frame.copy(content = "{}")
+            } else {
+                frame
+            }
+        }
 
     /**
      * One-shot split of a full reply into (think-stripped answer, reasoning).

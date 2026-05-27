@@ -2,6 +2,17 @@
 
 Bash on Kotlin
 
+[![Maven Central Version](https://img.shields.io/maven-central/v/com.accucodeai.kash/kash?label=Kash)](https://central.sonatype.com/artifact/com.accucodeai.kash/kash)
+[![Maven Central Version](https://img.shields.io/maven-central/v/com.accucodeai.kash/api?label=API)](https://central.sonatype.com/artifact/com.accucodeai.kash/api)
+[![Maven Central Version](https://img.shields.io/maven-central/v/com.accucodeai.kash/corevm?label=CoreVM)](https://central.sonatype.com/artifact/com.accucodeai.kash/corevm)
+[![Maven Central Version](https://img.shields.io/maven-central/v/com.accucodeai.kash/tools.posix.posix-module?label=Posix%20Tools)](https://central.sonatype.com/artifact/com.accucodeai.kash/tools.posix.posix-module)
+[![Maven Central Version](https://img.shields.io/maven-central/v/com.accucodeai.kash/tools.ext.ext-module?label=Ext%20Tools)](https://central.sonatype.com/artifact/com.accucodeai.kash/tools.ext.ext-module)
+[![Maven Central Version](https://img.shields.io/maven-central/v/com.accucodeai.kash/tools.kash.kash-module?label=Kash%20Tools)](https://central.sonatype.com/artifact/com.accucodeai.kash/tools.kash.kash-module)
+[![Maven Central Version](https://img.shields.io/maven-central/v/com.accucodeai.kash/tools.forensics.forensics-module?label=Forensics%20Tools)](https://central.sonatype.com/artifact/com.accucodeai.kash/tools.forensics.forensics-module)
+[![Maven Central Version](https://img.shields.io/maven-central/v/com.accucodeai.kash/tools.ai.ai-module?label=AI%20Tools)](https://central.sonatype.com/artifact/com.accucodeai.kash/tools.ai.ai-module)
+[![Platform](https://img.shields.io/badge/Platform-JVM%20%7C%20WASM-blueviolet?logo=kotlin&logoColor=white)](#)
+
+
 ## What is Kash?
 
 Kash is POSIX userland environment with over 120 tools directly implemented in Kotlin. It runs
@@ -33,6 +44,41 @@ Better yet, point Claude at it
 Note: By default the REPL maintains a snapshot in `.kash`. We don't currently run a daemon so
 this snapshot is simply locked until the previous REPL (and KashMachine) closes. This is a limitation with `kash-app` not
 necesarilly a core limitation, as we fully support parallel shells.
+
+## Use it as a library
+
+Kash is published to Maven Central under the `com.accucodeai.kash` group. Add the
+repository and pull in the core, then **pick only the commands you need** — every
+command is its own module, so you don't drag in the whole userland to get `grep`.
+
+```kotlin
+// build.gradle.kts
+repositories {
+    mavenCentral()
+}
+
+dependencies {
+    // Core: the shell engine + KashMachine (parsing, job control, the VM).
+    implementation("com.accucodeai.kash:kash:0.1.0")
+
+    // À la carte commands — add a line per tool you actually use.
+    implementation("com.accucodeai.kash:tools.posix.grep:0.1.0")
+    implementation("com.accucodeai.kash:tools.posix.sed:0.1.0")
+    implementation("com.accucodeai.kash:tools.posix.awk:0.1.0")
+
+    // Or grab a whole suite at once via its aggregate module:
+    implementation("com.accucodeai.kash:tools.posix.posix-module:0.1.0")   // all POSIX tools
+    // tools.ext.ext-module · tools.kash.kash-module ·
+    // tools.forensics.forensics-module · tools.ai.ai-module
+}
+```
+
+Artifact IDs mirror the module path: `:tools:posix:grep` → `tools.posix.grep`. See
+the version badges above for the latest release of each module (use `0.1.0-SNAPSHOT`
+from the Central Portal snapshot repo for bleeding-edge builds).
+
+Kash is Kotlin Multiplatform (JVM + WASM); the same coordinates work from a
+multiplatform `commonMain` source set.
 
 ## License
 

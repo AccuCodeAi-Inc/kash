@@ -70,6 +70,15 @@ class AgentGraphLoopTest {
         private val blankAfterTool: Boolean = false,
         /** tool → blank → (nudge) → tool → blank → (nudge) → text: nudge EACH stop. */
         private val blankBetweenProgress: Boolean = false,
+        /**
+         * Call 1 → a real shell_exec; call 2 (sendToolResults) → a tool call
+         * whose `arguments` string is EMPTY (`""`); call 3 → text. Reproduces
+         * the live LM Studio / Gemma failure: a small model emits a tool call
+         * with no arguments, and Koog's `toMessageResponse` does an unguarded
+         * `Json.parseToJsonElement("")` → "unexpected end of the input at path: $"
+         * inside the sendToolResults node, killing the whole subgraph.
+         */
+        private val emptyArgsToolCall: Boolean = false,
         /** Always tool-then-blank: the nudge cap must stop it (no endless nudging). */
         private val relentlessBlank: Boolean = false,
         /**
@@ -298,6 +307,30 @@ class AgentGraphLoopTest {
                         else -> {
                             countNudges()
                             emitText("done")
+                        }
+                    }
+                    return@flow
+                }
+                if (emptyArgsToolCall) {
+                    when (streamCalls) {
+                        // user prompt → a normal tool call
+                        1 -> {
+                            emit(StreamFrame.ToolCallComplete("c1", "shell_exec", """{"command":"echo hi"}"""))
+                            emit(StreamFrame.End(finishReason = "tool_calls", metaInfo = ResponseMetaInfo.Empty))
+                        }
+
+                        // sendToolResults turn → a tool call with EMPTY arguments.
+                        2 -> {
+                            emit(StreamFrame.ToolCallComplete("c2", "shell_exec", ""))
+                            emit(StreamFrame.End(finishReason = "tool_calls", metaInfo = ResponseMetaInfo.Empty))
+                        }
+
+                        // executeTools runs the (now-defaulted) empty call → back
+                        // to sendToolResults → final text.
+                        else -> {
+                            emit(StreamFrame.TextDelta("recovered"))
+                            emit(StreamFrame.TextComplete("recovered"))
+                            emit(StreamFrame.End(finishReason = "stop", metaInfo = ResponseMetaInfo.Empty))
                         }
                     }
                     return@flow
@@ -904,6 +937,56 @@ class AgentGraphLoopTest {
             assertEquals(5, fake.streamCalls, "two empty stops → two re-requests")
             assertEquals(2, fake.nudgesInPrompt, "the model was nudged at BOTH stops · nudges=${fake.nudgesInPrompt}")
             assertTrue("done" in out, "final summary rendered · output=<<<$out>>>")
+        }
+
+    @Test
+    fun empty_tool_call_arguments_do_not_crash_the_loop() =
+        runTest {
+            // Live LM Studio / Gemma failure: the model emits a tool call with
+            // an EMPTY arguments string. Koog's toMessageResponse does an
+            // unguarded Json.parseToJsonElement("") → "unexpected end of the
+            // input at path: $" inside sendToolResults, which (before the guard)
+            // killed the whole subgraph and aborted the HTTP stream (LM Studio's
+            // "Client disconnected"). streamAssistant must default empty args to
+            // {} so the loop survives and the turn still completes.
+            val term = FakeTerminalControl()
+            term.pushChars("go")
+            term.pushKey(Key.Named.ENTER)
+            term.pushKey(Key.Ctrl('D'))
+
+            val captured = StringBuilder()
+            val sink =
+                object : SuspendSink {
+                    override suspend fun write(
+                        source: Buffer,
+                        byteCount: Long,
+                    ) {
+                        captured.append(source.readByteArray(byteCount.toInt()).decodeToString())
+                    }
+
+                    override suspend fun flush() {}
+
+                    override fun close() {}
+                }
+            val ctx = bareCommandContext(stdout = sink, stderr = sink)
+            val fake = FakeExecutor(emptyArgsToolCall = true)
+            val config =
+                AgentConfig(
+                    baseUrl = "http://localhost:1234",
+                    modelId = "fake-model",
+                    apiKey = "",
+                    systemPrompt = "test",
+                    temperature = 0.0,
+                    toolsEnabled = true,
+                )
+            val code = AgentSession(term, ctx, config, executorOverride = fake).run()
+            val out = captured.toString()
+            assertEquals(0, code, "loop survives the empty-args tool call · output=<<<$out>>>")
+            assertTrue(
+                "unexpected end of the input" !in out,
+                "the Json parse crash must not surface · output=<<<$out>>>",
+            )
+            assertTrue("recovered" in out, "the follow-up reply still rendered · output=<<<$out>>>")
         }
 
     @Test
