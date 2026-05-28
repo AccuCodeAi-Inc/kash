@@ -9,7 +9,8 @@ import com.accucodeai.kash.api.CommandTag
 import com.accucodeai.kash.api.ansi.Ansi
 import com.accucodeai.kash.api.ansi.AnsiStyler
 import com.accucodeai.kash.api.ansi.ColorMode
-import com.accucodeai.kash.api.io.readUtf8LineOrNull
+import com.accucodeai.kash.api.io.buffered
+import com.accucodeai.kash.api.io.readUtf8DelimitedOrNull
 import com.accucodeai.kash.api.io.writeLine
 import com.accucodeai.kash.api.io.writeUtf8
 import com.accucodeai.kash.api.util.matchGlob
@@ -35,6 +36,7 @@ import com.accucodeai.kash.shared.regex.LinearRegex
  *  - `-e PATTERN` add a pattern (repeatable)
  *  - `-f FILE` read patterns from FILE (one per line, repeatable)
  *  - `-r` / `-R` recurse directories (via `ctx.process.fs`)
+ *  - `-d` / `--directories=read|skip|recurse` directory-operand handling
  *  - `-s` suppress error messages about missing/unreadable files
  *  - `-x` match only entire lines
  *  - `-w` match must sit on word boundaries
@@ -45,6 +47,7 @@ import com.accucodeai.kash.shared.regex.LinearRegex
  *  - `-P` accepted for compatibility; RE2 backend (no lookaround/backrefs)
  *  - `-a` / `--text` treat binary files as text
  *  - `-I` skip binary files
+ *  - `-z` / `--null-data` records are NUL-terminated (input and output)
  *  - `--binary-files=binary|text|without-match` binary-file disposition
  *  - `--include=GLOB` / `--exclude=GLOB` filter file basenames under `-r`
  *  - `--include-dir=GLOB` / `--exclude-dir=GLOB` filter dir basenames under `-r`
@@ -244,6 +247,11 @@ internal suspend fun runGrep(
                 continue
             }
             if (ctx.process.fs.isDirectory(src.absPath) && !parsed.recursive) {
+                // -d skip: drop directory operands silently (no error, no
+                // effect on exit status). Default (-d read) reports the error.
+                if (parsed.skipDirectories) {
+                    continue
+                }
                 if (!parsed.suppressFileErrors) {
                     ctx.stderr.writeUtf8("$toolName: ${src.displayPath}: Is a directory\n")
                 }
@@ -334,61 +342,57 @@ private suspend fun grepOneSource(
             is GrepSource.File -> src.displayPath
             GrepSource.Stdin -> "(standard input)"
         }
-    val lines: List<String> =
-        run {
-            val out = mutableListOf<String>()
-            when (src) {
-                GrepSource.Stdin -> {
-                    while (true) {
-                        val line = ctx.stdin.readUtf8LineOrNull() ?: break
-                        out += line
-                    }
-                }
-
-                is GrepSource.File -> {
-                    val source = ctx.process.fs.source(src.absPath)
-                    try {
-                        while (true) {
-                            val line = source.readUtf8LineOrNull() ?: break
-                            out += line
-                        }
-                    } finally {
-                        try {
-                            source.close()
-                        } catch (_: Throwable) {
-                        }
-                    }
-                }
+    // Stream lines from a buffered source: one batched read per chunk instead
+    // of one upstream read per byte, and no whole-file `List<String>`. Both
+    // stdin and a file source are `SuspendSource`s, so `.buffered()` applies.
+    val source =
+        when (src) {
+            GrepSource.Stdin -> {
+                ctx.stdin.buffered()
             }
-            out
+
+            is GrepSource.File -> {
+                ctx.process.fs
+                    .source(src.absPath)
+                    .buffered()
+            }
         }
 
-    // Binary detection: a file is "binary" if any line contains a NUL. With
-    // --binary-files=without-match (`-I`), skip silently. With
-    // =binary (the default), emit a single "Binary file LABEL matches" line
-    // instead of the matches (unless -c/-l/-L/-q which have their own
-    // output). =text (`-a`) treats it as text — fall through.
-    val isBinary = src is GrepSource.File && lines.any { it.indexOf(0.toChar()) >= 0 }
-    if (isBinary && opts.binaryMode == BinaryMode.WITHOUT_MATCH) {
-        return GrepSourceResult(matched = false, count = 0)
-    }
-    val emitBinaryMarker =
-        isBinary && opts.binaryMode == BinaryMode.BINARY &&
+    // Modes whose output depends on the whole-file binary verdict: the default
+    // "Binary file LABEL matches" marker, and -I (skip binary files). A NUL can
+    // appear AFTER a matching line (see binary_default_prints_marker_line), so
+    // we can't emit a line until we know the file isn't binary — buffer the
+    // would-be output and resolve at EOF. These modes can't early-exit anyway,
+    // so deferring costs no extra reads, only memory bounded by the matched
+    // output rather than the whole file. =text (`-a`) treats it as text and
+    // streams; -c/-l/-L/-q/-o stream and may early-exit.
+    val markerEligible =
+        src is GrepSource.File && opts.binaryMode == BinaryMode.BINARY &&
             !opts.countOnly && !opts.filesWithMatches && !opts.filesWithoutMatch &&
             !opts.quiet && !opts.onlyMatching
+    val skipIfBinary = src is GrepSource.File && opts.binaryMode == BinaryMode.WITHOUT_MATCH
+    val deferOutput = markerEligible || skipIfBinary
+    val pending: MutableList<String>? = if (deferOutput) mutableListOf() else null
+    var sawNul = false
 
-    // -L special case: scan the whole file, suppress per-line output, print
-    // the filename only if no line matched.
-    if (opts.filesWithoutMatch) {
-        val anyMatch = lines.any { regex.containsMatch(it) xor opts.invert }
-        if (!anyMatch) writeLine(ctx, styler.style(label, palette.fn))
-        return GrepSourceResult(matched = !anyMatch, count = 0)
+    // -z / --null-data: records are NUL-terminated on input and output. The
+    // matching records (and their context lines + `--` separators) carry this
+    // terminator via [writeRecord]; the -l/-L filename, -c count, and binary
+    // marker stay newline-terminated (those align with -Z, not -z).
+    val recordSep = if (opts.nullData) "\u0000" else "\n"
+    val recordDelim = if (opts.nullData) 0.toByte() else '\n'.code.toByte()
+
+    suspend fun writeRecord(s: String) {
+        try {
+            ctx.stdout.writeUtf8(s)
+            ctx.stdout.writeUtf8(recordSep)
+        } catch (e: kotlinx.io.IOException) {
+            throw BrokenPipeMarker()
+        }
     }
 
-    if (emitBinaryMarker) {
-        val anyMatch = lines.any { regex.containsMatch(it) xor opts.invert }
-        if (anyMatch) writeLine(ctx, "Binary file $label matches")
-        return GrepSourceResult(matched = anyMatch, count = if (anyMatch) 1 else 0)
+    suspend fun emit(s: String) {
+        if (pending != null) pending.add(s) else writeRecord(s)
     }
 
     val before = if (opts.beforeContext > 0) ArrayDeque<Pair<Int, String>>() else null
@@ -401,7 +405,7 @@ private suspend fun grepOneSource(
 
     suspend fun emitSeparatorIfNeeded(nextLineNo: Int) {
         if (hasContext && lastPrintedLine >= 0 && nextLineNo - lastPrintedLine > 1) {
-            writeLine(ctx, styler.style("--", palette.se))
+            emit(styler.style("--", palette.se))
         }
     }
 
@@ -425,7 +429,7 @@ private suspend fun grepOneSource(
                     sb.append(styler.style(":", palette.se))
                 }
                 sb.append(styler.style(line.substring(m.offset, m.offset + m.length), palette.ms))
-                writeLine(ctx, sb.toString())
+                emit(sb.toString())
             }
             return
         }
@@ -448,72 +452,124 @@ private suspend fun grepOneSource(
             // match, we just emit it raw.
             sb.append(line)
         }
-        writeLine(ctx, sb.toString())
+        emit(sb.toString())
     }
 
-    for ((idx, line) in lines.withIndex()) {
-        val lineNo = idx + 1
-        val isMatch = regex.containsMatch(line) xor opts.invert
-
-        if (isMatch) {
-            sourceMatched = true
-            // -l: short-circuit, print filename once.
-            if (opts.filesWithMatches) {
-                writeLine(ctx, styler.style(label, palette.fn))
-                return GrepSourceResult(true, 1)
+    try {
+        var lineNo = 0
+        while (true) {
+            val line = source.readUtf8DelimitedOrNull(recordDelim) ?: break
+            lineNo++
+            // NUL is a binary signal only when it's NOT the record delimiter;
+            // under -z each record is the bytes between NULs, so it never holds
+            // the delimiter and the heuristic is moot — guard explicitly anyway.
+            if (src is GrepSource.File && !opts.nullData && !sawNul &&
+                line.indexOf(0.toChar()) >= 0
+            ) {
+                sawNul = true
             }
-            // -q: short-circuit, no output.
-            if (opts.quiet) return GrepSourceResult(true, 1)
 
-            if (cap != null && count >= cap) {
-                // Past the match cap. Allow after-context to drain.
-                if (afterRemaining > 0 && !opts.countOnly) {
-                    emitSeparatorIfNeeded(lineNo)
-                    printLine(line, lineNo, isMatch = false)
-                    lastPrintedLine = lineNo
-                    afterRemaining--
+            // -L only needs "does ANY line match"; stop at the first match.
+            if (opts.filesWithoutMatch) {
+                if (regex.containsMatch(line) xor opts.invert) {
+                    sourceMatched = true
+                    break
                 }
-                if (afterRemaining <= 0) break
                 continue
             }
 
-            count++
-            if (!opts.countOnly) {
-                // Drain before-context ahead of the match line.
-                if (before != null && before.isNotEmpty()) {
-                    val firstCtxLine = before.first().first
-                    if (lastPrintedLine >= 0 && firstCtxLine - lastPrintedLine > 1) {
-                        writeLine(ctx, styler.style("--", palette.se))
+            val isMatch = regex.containsMatch(line) xor opts.invert
+
+            if (isMatch) {
+                sourceMatched = true
+                // -l / -q short-circuit — unless the binary verdict is still
+                // pending (-Il / -Iq must read on to detect a trailing NUL),
+                // in which case fall through and resolve after the loop.
+                if (!deferOutput) {
+                    if (opts.filesWithMatches) {
+                        writeLine(ctx, styler.style(label, palette.fn))
+                        return GrepSourceResult(true, 1)
                     }
-                    for ((bn, bl) in before) {
-                        if (bn > lastPrintedLine) {
-                            printLine(bl, bn, isMatch = false)
-                            lastPrintedLine = bn
-                        }
-                    }
-                    before.clear()
-                } else {
-                    emitSeparatorIfNeeded(lineNo)
+                    if (opts.quiet) return GrepSourceResult(true, 1)
                 }
-                printLine(line, lineNo, isMatch = true)
-                lastPrintedLine = lineNo
-            }
-            afterRemaining = opts.afterContext
-            // If we just hit the cap and no after-context to drain, stop.
-            if (cap != null && count >= cap && afterRemaining == 0) break
-        } else {
-            // Non-match. Possibly draining after-context.
-            if (afterRemaining > 0 && !opts.countOnly) {
-                printLine(line, lineNo, isMatch = false)
-                lastPrintedLine = lineNo
-                afterRemaining--
+                if (opts.filesWithMatches || opts.quiet) continue
+
+                if (cap != null && count >= cap) {
+                    // Past the match cap. Allow after-context to drain.
+                    if (afterRemaining > 0 && !opts.countOnly) {
+                        emitSeparatorIfNeeded(lineNo)
+                        printLine(line, lineNo, isMatch = false)
+                        lastPrintedLine = lineNo
+                        afterRemaining--
+                    }
+                    if (afterRemaining <= 0) break
+                    continue
+                }
+
+                count++
+                if (!opts.countOnly) {
+                    // Drain before-context ahead of the match line.
+                    if (!before.isNullOrEmpty()) {
+                        val firstCtxLine = before.first().first
+                        if (lastPrintedLine >= 0 && firstCtxLine - lastPrintedLine > 1) {
+                            emit(styler.style("--", palette.se))
+                        }
+                        for ((bn, bl) in before) {
+                            if (bn > lastPrintedLine) {
+                                printLine(bl, bn, isMatch = false)
+                                lastPrintedLine = bn
+                            }
+                        }
+                        before.clear()
+                    } else {
+                        emitSeparatorIfNeeded(lineNo)
+                    }
+                    printLine(line, lineNo, isMatch = true)
+                    lastPrintedLine = lineNo
+                }
+                afterRemaining = opts.afterContext
+                // If we just hit the cap and no after-context to drain, stop.
                 if (cap != null && count >= cap && afterRemaining == 0) break
-            } else if (before != null) {
-                if (before.size >= opts.beforeContext) before.removeFirst()
-                before.addLast(lineNo to line)
+            } else {
+                // Non-match. Possibly draining after-context.
+                if (afterRemaining > 0 && !opts.countOnly) {
+                    printLine(line, lineNo, isMatch = false)
+                    lastPrintedLine = lineNo
+                    afterRemaining--
+                    if (cap != null && count >= cap && afterRemaining == 0) break
+                } else if (before != null) {
+                    if (before.size >= opts.beforeContext) before.removeFirst()
+                    before.addLast(lineNo to line)
+                }
             }
         }
+    } finally {
+        try {
+            source.close()
+        } catch (_: Throwable) {
+        }
     }
+
+    // Resolve the whole-file binary verdict for the deferred modes, then
+    // commit any buffered output.
+    if (skipIfBinary && sawNul) return GrepSourceResult(matched = false, count = 0)
+    if (markerEligible && sawNul) {
+        if (sourceMatched) writeLine(ctx, "Binary file $label matches")
+        return GrepSourceResult(sourceMatched, if (sourceMatched) 1 else 0)
+    }
+    if (pending != null) for (s in pending) writeRecord(s)
+
+    // -L: print the label iff nothing matched.
+    if (opts.filesWithoutMatch) {
+        if (!sourceMatched) writeLine(ctx, styler.style(label, palette.fn))
+        return GrepSourceResult(matched = !sourceMatched, count = 0)
+    }
+    // -l / -q deferred resolution (the eager paths already returned in-loop).
+    if (opts.filesWithMatches) {
+        if (sourceMatched) writeLine(ctx, styler.style(label, palette.fn))
+        return GrepSourceResult(sourceMatched, if (sourceMatched) 1 else 0)
+    }
+    if (opts.quiet) return GrepSourceResult(sourceMatched, if (sourceMatched) 1 else 0)
 
     if (opts.countOnly && !opts.quiet) {
         val sb = StringBuilder()
@@ -581,6 +637,8 @@ internal data class ParsedArgs(
     val files: List<String>,
     val recursive: Boolean,
     val suppressFileErrors: Boolean,
+    /** -d skip / --directories=skip: silently drop directory operands. */
+    val skipDirectories: Boolean = false,
 )
 
 /**
@@ -622,6 +680,30 @@ internal fun parseArgs(
     val excludeDir = mutableListOf<String>()
     var binaryMode = BinaryMode.BINARY
     var color = ColorMode.NEVER
+    var nullData = false
+    // -d / --directories=read|skip|recurse. `read` (default) reports
+    // "Is a directory"; `recurse` is equivalent to -r; `skip` silently drops
+    // directory operands.
+    var skipDirectories = false
+
+    fun applyDirectoriesAction(raw: String) {
+        when (raw) {
+            "read" -> {}
+
+            // default — directory operands report "Is a directory"
+            "skip" -> {
+                skipDirectories = true
+            }
+
+            "recurse" -> {
+                recursive = true
+            }
+
+            else -> {
+                throw GrepUsageError("invalid action for directories: $raw")
+            }
+        }
+    }
 
     fun parseNum(
         opt: String,
@@ -730,6 +812,10 @@ internal fun parseArgs(
                     binaryMode = BinaryMode.TEXT
                 }
 
+                "--null-data" -> {
+                    nullData = true
+                }
+
                 "--perl-regexp" -> {
                     // Accepted for compatibility. The underlying engine is
                     // RE2/J: most PCRE patterns work, but lookaround and
@@ -791,6 +877,10 @@ internal fun parseArgs(
                                 }
                         }
 
+                        a.startsWith("--directories=") -> {
+                            applyDirectoriesAction(a.substringAfter('='))
+                        }
+
                         a == "--color" || a == "--colour" -> {
                             color = ColorMode.AUTO
                         }
@@ -837,6 +927,10 @@ internal fun parseArgs(
 
                     'n' -> {
                         lineNumbers = true
+                    }
+
+                    'z' -> {
+                        nullData = true
                     }
 
                     'l' -> {
@@ -931,6 +1025,22 @@ internal fun parseArgs(
                         j = a.length
                     }
 
+                    'd' -> {
+                        val rest = a.substring(j + 1)
+                        val raw =
+                            if (rest.isNotEmpty()) {
+                                rest
+                            } else {
+                                if (i + 1 >= args.size) {
+                                    throw GrepUsageError("option requires an argument: -d")
+                                }
+                                i++
+                                args[i]
+                            }
+                        applyDirectoriesAction(raw)
+                        j = a.length
+                    }
+
                     'e' -> {
                         val rest = a.substring(j + 1)
                         if (rest.isNotEmpty()) {
@@ -1005,9 +1115,11 @@ internal fun parseArgs(
                 excludeDir = excludeDir,
                 binaryMode = binaryMode,
                 color = color,
+                nullData = nullData,
             ),
         files = files,
         recursive = recursive,
         suppressFileErrors = suppressFileErrors,
+        skipDirectories = skipDirectories,
     )
 }

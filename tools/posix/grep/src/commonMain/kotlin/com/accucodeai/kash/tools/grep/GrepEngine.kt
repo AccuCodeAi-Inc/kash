@@ -59,6 +59,14 @@ internal data class GrepOptions(
      * get colors at the prompt.
      */
     val color: ColorMode = ColorMode.NEVER,
+    /**
+     * -z / --null-data. Treat input AND output records as NUL-terminated
+     * instead of newline-terminated — so a "line" may contain newlines and the
+     * record separator is `\0`. Pairs with `find -print0`. The NUL-based
+     * binary-file heuristic is disabled under -z (NUL is the delimiter here,
+     * not a binary signal).
+     */
+    val nullData: Boolean = false,
 )
 
 /**

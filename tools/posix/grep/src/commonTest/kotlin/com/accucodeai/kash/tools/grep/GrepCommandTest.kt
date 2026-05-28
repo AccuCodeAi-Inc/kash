@@ -830,4 +830,114 @@ class GrepCommandTest {
             assertEquals(0, rc.exitCode)
             assertEquals("needle\n", out.readString())
         }
+
+    // ---------- -z / --null-data ----------
+
+    @Test fun null_data_splits_input_on_nul_and_terminates_output_with_nul() =
+        runTest {
+            // Three NUL-separated records; two contain "foo".
+            val (ctx, out, _) = ctxFor("foo\u0000barfoo\u0000baz\u0000")
+            val rc = GrepCommandSpec().run(listOf("-z", "foo"), ctx)
+            assertEquals(0, rc.exitCode)
+            assertEquals("foo\u0000barfoo\u0000", out.readString())
+        }
+
+    @Test fun null_data_record_may_span_newlines() =
+        runTest {
+            // A record is delimited by NUL, so an embedded newline is data —
+            // the whole "alpha\nbeta" record matches on "beta".
+            val (ctx, out, _) = ctxFor("alpha\nbeta\u0000gamma\u0000")
+            val rc = GrepCommandSpec().run(listOf("-z", "beta"), ctx)
+            assertEquals(0, rc.exitCode)
+            assertEquals("alpha\nbeta\u0000", out.readString())
+        }
+
+    @Test fun null_data_long_form() =
+        runTest {
+            val (ctx, out, _) = ctxFor("one\u0000two\u0000")
+            val rc = GrepCommandSpec().run(listOf("--null-data", "two"), ctx)
+            assertEquals(0, rc.exitCode)
+            assertEquals("two\u0000", out.readString())
+        }
+
+    @Test fun null_data_no_trailing_delimiter_still_yields_last_record() =
+        runTest {
+            // Last record has no trailing NUL; it's still returned at EOF and,
+            // when matched, emitted NUL-terminated.
+            val (ctx, out, _) = ctxFor("aaa\u0000bbb")
+            val rc = GrepCommandSpec().run(listOf("-z", "bbb"), ctx)
+            assertEquals(0, rc.exitCode)
+            assertEquals("bbb\u0000", out.readString())
+        }
+
+    @Test fun null_data_disables_binary_nul_heuristic_for_files() =
+        runTest {
+            // Under -z, NUL is the record delimiter, so a file full of NULs is
+            // NOT flagged binary — matching records print normally instead of
+            // the "Binary file matches" marker.
+            val (ctx, out, _) = ctxFor("")
+            ctx.process.fs.writeBytes("/f", "needle\u0000other\u0000".encodeToByteArray())
+            val rc = GrepCommandSpec().run(listOf("-z", "needle", "/f"), ctx)
+            assertEquals(0, rc.exitCode)
+            assertEquals("needle\u0000", out.readString())
+        }
+
+    // ---------- -d / --directories ----------
+
+    @Test fun dash_d_skip_drops_directory_operand_silently() =
+        runTest {
+            val (ctx, out, err) = ctxFor("")
+            // Writing into /d makes /d a directory.
+            ctx.process.fs.writeBytes("/d/a.txt", "needle\n".encodeToByteArray())
+            val rc = GrepCommandSpec().run(listOf("-d", "skip", "needle", "/d"), ctx)
+            // The only operand was a dir; skipped -> nothing searched, no error.
+            assertEquals(1, rc.exitCode)
+            assertEquals("", out.readString())
+            assertEquals("", err.readString())
+        }
+
+    @Test fun dash_d_skip_still_searches_file_operands() =
+        runTest {
+            val (ctx, out, _) = ctxFor("")
+            ctx.process.fs.writeBytes("/d/a.txt", "x\n".encodeToByteArray())
+            ctx.process.fs.writeBytes("/f", "needle\n".encodeToByteArray())
+            val rc = GrepCommandSpec().run(listOf("-d", "skip", "needle", "/d", "/f"), ctx)
+            assertEquals(0, rc.exitCode)
+            assertEquals("/f:needle\n", out.readString())
+        }
+
+    @Test fun dash_d_recurse_behaves_like_dash_r() =
+        runTest {
+            val (ctx, out, _) = ctxFor("")
+            ctx.process.fs.writeBytes("/d/a.txt", "needle\n".encodeToByteArray())
+            val rc = GrepCommandSpec().run(listOf("-d", "recurse", "needle", "/d"), ctx)
+            assertEquals(0, rc.exitCode)
+            assertTrue(out.readString().contains("/d/a.txt:needle"))
+        }
+
+    @Test fun dash_d_read_reports_is_a_directory() =
+        runTest {
+            val (ctx, _, err) = ctxFor("")
+            ctx.process.fs.writeBytes("/d/a.txt", "x\n".encodeToByteArray())
+            val rc = GrepCommandSpec().run(listOf("-d", "read", "needle", "/d"), ctx)
+            assertEquals(2, rc.exitCode)
+            assertTrue(err.readString().contains("Is a directory"))
+        }
+
+    @Test fun dash_d_long_form_skip() =
+        runTest {
+            val (ctx, _, err) = ctxFor("")
+            ctx.process.fs.writeBytes("/d/a.txt", "needle\n".encodeToByteArray())
+            val rc = GrepCommandSpec().run(listOf("--directories=skip", "needle", "/d"), ctx)
+            assertEquals(1, rc.exitCode)
+            assertEquals("", err.readString())
+        }
+
+    @Test fun dash_d_rejects_bad_value() =
+        runTest {
+            val (ctx, _, err) = ctxFor("hi\n")
+            val rc = GrepCommandSpec().run(listOf("-d", "banana", "x"), ctx)
+            assertEquals(2, rc.exitCode)
+            assertTrue(err.readString().contains("banana"))
+        }
 }
