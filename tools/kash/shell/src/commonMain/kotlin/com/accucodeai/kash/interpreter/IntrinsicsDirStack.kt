@@ -47,7 +47,7 @@ private fun looksLikeBadNumeric(s: String): Boolean =
  *  - exists but is a regular file → "Not a directory"
  */
 private fun Interpreter.dirErrorWording(path: String): String {
-    val fs = process.machine.fs
+    val fs = process.fs
     return if (!fs.exists(path)) "No such file or directory" else "Not a directory"
 }
 
@@ -179,7 +179,7 @@ internal suspend fun Interpreter.runPushdIntrinsic(
     args: List<String>,
     stdio: Stdio,
 ): Int {
-    val fs = process.machine.fs
+    val fs = process.fs
     // `-n` is a flag, not a target: push but don't cd. Strip it from
     // args first so the remaining target is the path / +N / -N.
     val noCd = args.contains("-n")
@@ -287,7 +287,7 @@ internal suspend fun Interpreter.runPopdIntrinsic(
     args: List<String>,
     stdio: Stdio,
 ): Int {
-    val fs = process.machine.fs
+    val fs = process.fs
     // `-n` keeps the cwd put while still removing an entry from the
     // dirStack. Same arg-filter trick we use in pushd.
     val noCd = args.contains("-n")

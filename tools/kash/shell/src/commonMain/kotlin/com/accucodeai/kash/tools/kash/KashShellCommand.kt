@@ -214,7 +214,7 @@ public class KashShellCommand :
         shellOpts: Set<Char> = emptySet(),
         noProfile: Boolean = false,
     ): CommandResult {
-        val fs = ctx.process.machine.fs
+        val fs = ctx.process.fs
         val resolved =
             if (path.startsWith("/")) {
                 path

@@ -21,7 +21,7 @@ import com.accucodeai.kash.api.io.writeUtf8
  * - `python3 --help`              usage
  *
  * Behavior the engine owns (and this command does not):
- * filesystem virtualization (Python `open()` ⇒ `ctx.process.machine.fs`), sandbox policy
+ * filesystem virtualization (Python `open()` ⇒ `ctx.process.fs`, the opener-bound facade), sandbox policy
  * (no native, no subprocess, no host classes), and timeout enforcement.
  *
  * Exit codes follow CPython where reasonable: `0` on success, `1` on
@@ -79,7 +79,7 @@ public class Python3Command(
                 if (parsed.source is PythonSource.Stdin && ctx.process.isTty(0)) {
                     val code =
                         engine.runInteractiveRepl(
-                            ctx.process.machine.fs,
+                            ctx.process.fs,
                             ctx.process.cwd,
                             ctx.process.env,
                             ctx.stdin,
@@ -98,7 +98,7 @@ public class Python3Command(
                     engine.execute(
                         source = parsed.source,
                         scriptArgs = parsed.scriptArgs,
-                        fs = ctx.process.machine.fs,
+                        fs = ctx.process.fs,
                         env = ctx.process.env,
                         cwd = ctx.process.cwd,
                         stdin = ctx.stdin,

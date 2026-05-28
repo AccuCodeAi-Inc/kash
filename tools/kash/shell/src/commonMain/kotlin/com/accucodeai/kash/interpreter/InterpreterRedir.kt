@@ -433,9 +433,9 @@ internal suspend fun Interpreter.applyRedirections(
                 val path = Paths.resolve(cwd, originalArg)
                 val ofd =
                     try {
-                        fs.openHandle(path, AccessMode.RDONLY, opener = process)
+                        process.fs.openHandle(path, AccessMode.RDONLY, opener = process)
                             ?: OpenFileDescription(
-                                source = fs.source(path),
+                                source = process.fs.source(path),
                                 accessMode = AccessMode.RDONLY,
                                 path = path,
                             )
@@ -519,10 +519,10 @@ internal suspend fun Interpreter.applyRedirections(
                     }
                 }
                 val ofd =
-                    fs.openHandle(path, AccessMode.WRONLY, opener = process)
+                    process.fs.openHandle(path, AccessMode.WRONLY, opener = process)
                         ?: OpenFileDescription(
                             sink =
-                                fs.sink(
+                                process.fs.sink(
                                     path,
                                     append = r.operator == RedirOp.APPEND,
                                     mode = 0b110_110_110 and umask.inv(),
@@ -571,10 +571,10 @@ internal suspend fun Interpreter.applyRedirections(
                     Paths
                         .resolve(cwd, expandSingle((r.target as RedirTarget.File).word))
                 val ofd =
-                    fs.openHandle(path, AccessMode.WRONLY, opener = process)
+                    process.fs.openHandle(path, AccessMode.WRONLY, opener = process)
                         ?: OpenFileDescription(
                             sink =
-                                fs.sink(
+                                process.fs.sink(
                                     path,
                                     append = r.operator == RedirOp.OUT_AND_ERR_APPEND,
                                     mode = 0b110_110_110 and umask.inv(),
@@ -726,9 +726,9 @@ internal suspend fun Interpreter.applyRedirections(
                                 Paths
                                     .resolve(cwd, expanded)
                             val ofd =
-                                fs.openHandle(path, AccessMode.WRONLY, opener = process)
+                                process.fs.openHandle(path, AccessMode.WRONLY, opener = process)
                                     ?: OpenFileDescription(
-                                        sink = fs.sink(path, append = false),
+                                        sink = process.fs.sink(path, append = false),
                                         accessMode = AccessMode.WRONLY,
                                         path = path,
                                     )
@@ -875,7 +875,7 @@ internal suspend fun Interpreter.applyRedirections(
                 val originalArg = expandSingle((r.target as RedirTarget.File).word)
                 val path = Paths.resolve(cwd, originalArg)
                 val ofd =
-                    fs.openHandle(path, AccessMode.RDWR, opener = process)
+                    process.fs.openHandle(path, AccessMode.RDWR, opener = process)
                         ?: run {
                             base.stderr.writeUtf8(
                                 "${shellDiagPrefix()}$originalArg: No such file or directory\n",

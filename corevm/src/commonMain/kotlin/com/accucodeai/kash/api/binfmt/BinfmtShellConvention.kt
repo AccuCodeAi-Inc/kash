@@ -49,7 +49,10 @@ public class BinfmtShellConvention : BinfmtHandler {
         val shell = req.shellRunner ?: return ExecOutcome.NotMine
         val text =
             try {
-                req.machine.fs
+                // Read through the invoking process's facade (not raw
+                // machine.fs) so executing a script file is recorded as a
+                // READ of its path, attributed to the caller.
+                req.parent.fs
                     .readBytes(req.path)
                     .decodeToString()
             } catch (e: Throwable) {

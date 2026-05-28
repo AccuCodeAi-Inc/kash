@@ -79,6 +79,16 @@ internal class DefaultKashMachine(
     // (auto-reaped, slot-only) reference in the snapshot.
     override var nextPid: Int = 1
 
+    override val fileAccess: com.accucodeai.kash.fs.FileAccessBus =
+        com.accucodeai.kash.fs
+            .FileAccessBus()
+
+    // Monotonic file-access scope ids. Starts at 1 so 0 stays reserved for
+    // "unscoped" (access made by a process the interpreter never stamped).
+    private var nextScopeId: Long = 1L
+
+    override fun allocateScopeId(): Long = nextScopeId++
+
     /**
      * Per-spawn exit-completion handles. Lets [wait] suspend until the
      * child completes without polling. Kept off the [KashProcess] type

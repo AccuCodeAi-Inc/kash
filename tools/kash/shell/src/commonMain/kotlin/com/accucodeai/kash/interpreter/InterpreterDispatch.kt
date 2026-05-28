@@ -4,22 +4,17 @@ import com.accucodeai.kash.api.CommandContext
 import com.accucodeai.kash.api.CommandKind
 import com.accucodeai.kash.api.CommandSpec
 import com.accucodeai.kash.api.ExitStatus
-import com.accucodeai.kash.api.ShellRunner
-import com.accucodeai.kash.api.UtilityRunner
-import com.accucodeai.kash.api.installFd
 import com.accucodeai.kash.api.io.SuspendSource
 import com.accucodeai.kash.api.io.writeUtf8
 import com.accucodeai.kash.api.util.emptySource
 import com.accucodeai.kash.ast.Connector
 import com.accucodeai.kash.ast.InlineAssignment
-import com.accucodeai.kash.ast.Script
 import com.accucodeai.kash.ast.SimpleCommand
 import com.accucodeai.kash.ast.Statement
 import com.accucodeai.kash.ast.Word
 import com.accucodeai.kash.ast.WordPart
 import com.accucodeai.kash.fs.Paths
 import com.accucodeai.kash.parser.isShellIdentifier
-import kotlinx.coroutines.async
 import kotlinx.io.readString
 
 /**
@@ -584,6 +579,12 @@ internal suspend fun Interpreter.runResolvedSpec(
                     if (inlineEnv.isNotEmpty()) child.env.putAll(inlineEnv)
                     child.commandName = name
                     child.argv = listOf(name) + args
+                    // Stamp a fresh file-access scope for this invocation,
+                    // but only if the fork didn't already inherit one — a
+                    // grandchild spawned by a tool (find -exec, xargs UTIL)
+                    // keeps the parent tool's scope so its touches group
+                    // under the originating command.
+                    child.traceScopeId = child.traceScopeId ?: machine.allocateScopeId()
                     installStdioFds(child, stdio)
                     val ctx =
                         CommandContext(
@@ -678,6 +679,11 @@ internal suspend fun Interpreter.runResolvedSpec(
             val savedFd0 = process.fdTable[0]?.also { it.ofd.retain() }
             val savedFd1 = process.fdTable[1]?.also { it.ofd.retain() }
             val savedFd2 = process.fdTable[2]?.also { it.ofd.retain() }
+            // Scope this builtin's file touches to a fresh id on the shell's
+            // own process, restored in the finally below so the shell's
+            // between-command access stays unscoped (id 0).
+            val savedScopeId = process.traceScopeId
+            process.traceScopeId = machine.allocateScopeId()
             installStdioFds(process, stdio)
             val ctx =
                 CommandContext(
@@ -731,6 +737,7 @@ internal suspend fun Interpreter.runResolvedSpec(
                     restoreFd(process, 0, savedFd0)
                     restoreFd(process, 1, savedFd1)
                     restoreFd(process, 2, savedFd2)
+                    process.traceScopeId = savedScopeId
                 }
             r.newCwd?.let {
                 cwd = it

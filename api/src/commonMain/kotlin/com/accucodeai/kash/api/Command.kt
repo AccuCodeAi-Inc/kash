@@ -164,7 +164,7 @@ public class CommandContext(
     // Tools that want explicit semantic clarity can still read
     // `ctx.process.env` — both forms reach the same map.
 
-    public val fs: FileSystem get() = process.machine.fs
+    public val fs: FileSystem get() = process.fs
     public val env: MutableMap<String, String> get() = process.env
     public val cwd: String get() = process.cwd
     public val umask: Int get() = process.umask

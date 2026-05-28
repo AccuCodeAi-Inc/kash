@@ -11,7 +11,6 @@ import com.accucodeai.kash.api.installStdio
 import com.accucodeai.kash.api.io.SuspendSink
 import com.accucodeai.kash.api.io.SuspendSource
 import com.accucodeai.kash.api.io.asSuspendSink
-import com.accucodeai.kash.api.io.writeUtf8
 import com.accucodeai.kash.api.sandbox.NetworkPolicy
 import com.accucodeai.kash.api.sandbox.SandboxPolicy
 import com.accucodeai.kash.api.signal.KashSignal
@@ -19,18 +18,18 @@ import com.accucodeai.kash.api.terminal.ControllingTty
 import com.accucodeai.kash.api.terminal.TerminalControl
 import com.accucodeai.kash.api.user.UserDatabase
 import com.accucodeai.kash.api.util.bufferOf
-import com.accucodeai.kash.ast.Script
+import com.accucodeai.kash.fs.FileAccess
 import com.accucodeai.kash.fs.FileSystem
 import com.accucodeai.kash.fs.InMemoryFs
 import com.accucodeai.kash.fs.installSystemBin
 import com.accucodeai.kash.interpreter.Interpreter
-import com.accucodeai.kash.parser.Parser
 import com.accucodeai.kash.snapshot.InterpreterSnapshot
 import com.accucodeai.kash.tools.ext.extCommands
 import com.accucodeai.kash.tools.forensics.forensicsCommands
 import com.accucodeai.kash.tools.kash.all.kashCommands
 import com.accucodeai.kash.tools.posix.posixCommands
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.channels.Channel
 import kotlinx.io.Buffer
 import kotlinx.io.readString
 import kotlin.coroutines.CoroutineContext
@@ -273,6 +272,17 @@ public class Kash(
     }
 
     /**
+     * One-shot exec with file-access tracing toggled inline — the terse
+     * "yolo" form: `kash.exec("python3 build.py", traceAccess = true)`, then
+     * read [ExecResult.touched] (or its `reads()` / `writes()` helpers).
+     * Sugar for `exec(script, ExecOptions(traceAccess = traceAccess))`.
+     */
+    public suspend fun exec(
+        script: String,
+        traceAccess: Boolean,
+    ): ExecResult = exec(script, ExecOptions(traceAccess = traceAccess))
+
+    /**
      * Cancel every session currently registered on this VM and tear down
      * the machine. Idempotent. After [close], [newSession] / [exec] must
      * not be called.
@@ -449,6 +459,16 @@ public class Kash(
                 options.scriptName == "kash" || options.scriptName == "bash"
             val out = Buffer()
             val err = if (options.mergeStderr) out else Buffer()
+            // File-access capture (opt-in). A synchronous observer on the
+            // bus funnels every recorded touch into an unbounded channel —
+            // emit() calls it inline, so by the time runStreaming returns
+            // the channel holds the complete set (no async drain). When off,
+            // nothing is registered and the recording layer allocates nothing.
+            val traceChannel: Channel<FileAccess>? =
+                if (options.traceAccess) Channel(Channel.UNLIMITED) else null
+            val traceObserver: ((FileAccess) -> Unit)? =
+                traceChannel?.let { ch -> { ch.trySend(it) } }
+            traceObserver?.let { machine.fileAccess.addObserver(it) }
             // Parse warnings are no longer collected up-front — each
             // StatementStream.next() returns its own warnings on first
             // yield, and the source-driven runStreaming loop attributes
@@ -472,8 +492,11 @@ public class Kash(
                     interpreter.cwd = savedCwd
                     interpreter.currentOuterScript = savedOuterScript
                     interpreter.currentOuterIsCLine = savedOuterIsCLine
+                    traceObserver?.let { machine.fileAccess.removeObserver(it) }
+                    traceChannel?.close()
                 }
-            return ExecResult(out.readString(), err.readString(), code)
+            val touched = traceChannel?.let { drainTouched(it) } ?: emptyList()
+            return ExecResult(out.readString(), err.readString(), code, touched)
         }
 
         /**
@@ -711,4 +734,18 @@ public fun defaultEnvFor(userDb: UserDatabase): Map<String, String> {
         // POSIX getopts: OPTIND starts at 1 in every new shell.
         "OPTIND" to "1",
     )
+}
+
+/**
+ * Drain a closed, buffered [Channel] of [FileAccess] into a list. The
+ * observer fed it synchronously during the exec, so after close every
+ * event is already buffered — `tryReceive` empties it without suspending.
+ */
+private fun drainTouched(channel: Channel<FileAccess>): List<FileAccess> {
+    val touched = ArrayList<FileAccess>()
+    while (true) {
+        val r = channel.tryReceive()
+        if (r.isSuccess) touched.add(r.getOrThrow()) else break
+    }
+    return touched
 }

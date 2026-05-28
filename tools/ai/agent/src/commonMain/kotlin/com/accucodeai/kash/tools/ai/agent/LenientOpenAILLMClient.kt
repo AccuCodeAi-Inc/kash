@@ -18,6 +18,8 @@ import ai.koog.prompt.params.LLMParams
 import ai.koog.prompt.streaming.StreamFrame
 import kotlinx.coroutines.flow.Flow
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.jsonArray
@@ -99,21 +101,23 @@ internal open class LenientOpenAILLMClient(
     }
 
     override fun decodeStreamingResponse(data: String): OpenAIChatCompletionStreamResponse {
-        val base =
-            try {
-                super.decodeStreamingResponse(data)
-            } catch (_: Throwable) {
-                // Empty-choices chunk → Koog's frame mapper emits nothing for it,
-                // so the malformed chunk becomes a no-op and the stream continues.
-                return OpenAIChatCompletionStreamResponse(
-                    choices = emptyList(),
-                    created = 0L,
-                    id = "",
-                    model = "",
-                    objectType = "chat.completion.chunk",
-                )
-            }
-        return foldReasoningIntoContent(base, data)
+        runCatching { return foldReasoningIntoContent(super.decodeStreamingResponse(data), data) }
+
+        // Strict decode failed. DON'T blanket-drop the chunk — that loses real
+        // content (esp. tool-call argument fragments). Distinguish the two
+        // cases via a tolerant parse: a chunk with no `choices` is the trailing
+        // usage/keep-alive chunk (koog#139's streaming sibling) and is safe to
+        // no-op; a chunk that DOES carry choices is content and must be salvaged.
+        val root = runCatching { Json.parseToJsonElement(data).jsonObject }.getOrNull()
+        val choices = (root?.get("choices") as? JsonArray)?.takeIf { it.isNotEmpty() } ?: return noOpChunk()
+
+        // A content-bearing chunk that failed strict decode is almost always a
+        // tool-call continuation that omitted the required (no-default)
+        // `OpenAIStreamToolCall.index`. Inject it and retry super's typed decode
+        // so the argument fragment survives instead of vanishing.
+        val patched = JsonObject(root + ("choices" to JsonArray(choices.map(::patchToolCallIndex)))).toString()
+        return runCatching { foldReasoningIntoContent(super.decodeStreamingResponse(patched), data) }
+            .getOrElse { noOpChunk() }
     }
 
     /**
@@ -198,6 +202,34 @@ internal open class LenientOpenAILLMClient(
         // side keys off exactly these.
         const val THINK_OPEN = "<think>"
         const val THINK_CLOSE = "</think>"
+
+        /** A choice-less chunk Koog's frame mapper emits nothing for. */
+        fun noOpChunk(): OpenAIChatCompletionStreamResponse =
+            OpenAIChatCompletionStreamResponse(
+                choices = emptyList(),
+                created = 0L,
+                id = "",
+                model = "",
+                objectType = "chat.completion.chunk",
+            )
+
+        /**
+         * Default any tool_call in this choice's `delta` that's missing the
+         * required (no-default) `index` to 0. The realistic culprit when a
+         * content-bearing stream chunk fails strict decode; patching it lets the
+         * argument fragment survive re-decode. Untouched if there's nothing to fix.
+         */
+        fun patchToolCallIndex(choice: JsonElement): JsonElement {
+            val obj = choice as? JsonObject ?: return choice
+            val delta = obj["delta"] as? JsonObject ?: return choice
+            val calls = delta["tool_calls"] as? JsonArray ?: return choice
+            val fixed =
+                calls.map { tc ->
+                    val t = tc as? JsonObject ?: return@map tc
+                    if ("index" in t) t else JsonObject(t + ("index" to JsonPrimitive(0)))
+                }
+            return JsonObject(obj + ("delta" to JsonObject(delta + ("tool_calls" to JsonArray(fixed)))))
+        }
 
         /**
          * Pull `delta.reasoning_content` (DeepSeek shape) or `delta.reasoning`

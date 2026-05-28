@@ -58,6 +58,14 @@ public class MountedFileSystem(
     public fun mounts(): List<Mount> = mounts
 
     /**
+     * The [FsLabel] of the mount that owns [path] (longest-prefix routed).
+     * Used by the file-access recording layer to apply per-mount policy —
+     * e.g. record reads+writes on USER, mutations-only on HOST_BORROW,
+     * nothing on ENGINE_CACHE/SYSTEM_BIN.
+     */
+    public fun mountLabel(path: String): FsLabel = route(path).mount.label
+
+    /**
      * Capture a label-aware snapshot.
      *
      * Only [FsLabel.USER] mounts whose backing FS is an [InMemoryFs] have

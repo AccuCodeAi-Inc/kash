@@ -193,14 +193,14 @@ private suspend fun Interpreter.loadHistoryFromFile(
     silentMissing: Boolean = false,
 ): Int {
     val resolved = Paths.resolve(cwd, path)
-    if (!process.machine.fs.exists(resolved)) {
+    if (!process.fs.exists(resolved)) {
         if (silentMissing) return 0
         stdio.stderr.writeUtf8("${shellDiagPrefix()}history: $path: cannot read: No such file or directory\n")
         return 1
     }
     val text =
         try {
-            process.machine.fs
+            process.fs
                 .readBytes(resolved)
                 .decodeToString()
         } catch (t: Throwable) {
@@ -226,14 +226,14 @@ private suspend fun Interpreter.writeHistoryToFile(
     val resolved = Paths.resolve(cwd, path)
     val payload = history.joinToString("\n", postfix = if (history.isNotEmpty()) "\n" else "")
     try {
-        if (appendOnly && process.machine.fs.exists(resolved)) {
+        if (appendOnly && process.fs.exists(resolved)) {
             val prior =
-                process.machine.fs
+                process.fs
                     .readBytes(resolved)
                     .decodeToString()
-            process.machine.fs.writeBytes(resolved, (prior + payload).encodeToByteArray())
+            process.fs.writeBytes(resolved, (prior + payload).encodeToByteArray())
         } else {
-            process.machine.fs.writeBytes(resolved, payload.encodeToByteArray())
+            process.fs.writeBytes(resolved, payload.encodeToByteArray())
         }
     } catch (t: Throwable) {
         stdio.stderr.writeUtf8(

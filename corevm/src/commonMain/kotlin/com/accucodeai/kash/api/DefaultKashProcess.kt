@@ -75,6 +75,7 @@ internal class DefaultKashProcess(
     // through to `ps` shows as `[unknown]` rather than masquerading as
     // the shell — useful for catching processes that escaped labeling.
     override var commandName: String = "",
+    override var traceScopeId: Long? = null,
     override val startTimeMillis: Long = 0L,
     override var userCpuMicros: Long = 0L,
     override var sysCpuMicros: Long = 0L,
@@ -87,8 +88,22 @@ internal class DefaultKashProcess(
     // /dev/tty resolve relative to the calling process. Cached
     // (lazy val) so process.fs returns the same instance each call —
     // identity stability matters for caching and ===-based assertions.
+    //
+    // Layering: OpenerBoundFs → RecordingFileSystem → machine.fs. The
+    // recording layer attributes every read/mutation this process makes
+    // to the machine's FileAccessBus (out-of-band metric); OpenerBoundFs
+    // stays outermost so callers using the non-opener methods still get
+    // `this` threaded as the opener.
     override val fs: com.accucodeai.kash.fs.FileSystem by lazy {
-        OpenerBoundFs(delegate = machine.fs, opener = this)
+        OpenerBoundFs(
+            delegate =
+                com.accucodeai.kash.fs.RecordingFileSystem(
+                    delegate = machine.fs,
+                    opener = this,
+                    bus = machine.fileAccess,
+                ),
+            opener = this,
+        )
     }
 
     override fun fork(): KashProcess {
@@ -148,6 +163,9 @@ internal class DefaultKashProcess(
                 exitStatus = null,
                 argv = argv.toList(),
                 commandName = commandName,
+                // Inherit the parent's file-access scope so a tool's
+                // grandchildren (find -exec, xargs UTIL) share its scope.
+                traceScopeId = traceScopeId,
                 startTimeMillis = 0L, // caller stamps with now()
                 userCpuMicros = 0L,
                 sysCpuMicros = 0L,

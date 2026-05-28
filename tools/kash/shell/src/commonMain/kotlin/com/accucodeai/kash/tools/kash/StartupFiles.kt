@@ -49,7 +49,7 @@ internal object StartupFiles {
         interp: Interpreter,
         ctx: CommandContext,
     ): Boolean {
-        val fs = ctx.process.machine.fs
+        val fs = ctx.process.fs
         if (!fs.exists(path)) return false
         if (fs.isDirectory(path)) return false
         val text =

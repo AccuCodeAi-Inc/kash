@@ -38,6 +38,22 @@ public interface KashMachine {
     public val fs: FileSystem
 
     /**
+     * Machine-wide stream of filesystem touches ([com.accucodeai.kash.fs.FileAccess]),
+     * emitted by the per-process recording facade as commands read and
+     * mutate files. Out-of-band metric only — never part of any command's
+     * stdout. Subscribe and group by `scopeId` to see what a command touched.
+     */
+    public val fileAccess: com.accucodeai.kash.fs.FileAccessBus
+
+    /**
+     * Allocate a fresh, monotonically-increasing file-access *scope id*.
+     * The interpreter stamps one per command invocation onto the running
+     * process; the fork subtree inherits it, so every [com.accucodeai.kash.fs.FileAccess]
+     * a command (and its grandchildren) produces shares one id.
+     */
+    public fun allocateScopeId(): Long
+
+    /**
      * Pluggable foreground-signal receiver. The host (kash-app's `Main`)
      * catches asynchronous signals (SIGINT, SIGTSTP, SIGTERM) from the JVM
      * and forwards them through this slot. Whichever process is currently

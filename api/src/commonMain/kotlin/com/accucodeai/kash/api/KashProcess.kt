@@ -163,6 +163,14 @@ public interface KashProcess {
     /** Pretty name for `ps`/`jobs`. */
     public var commandName: String
 
+    /**
+     * File-access correlation id (see [KashMachine.allocateScopeId]). The
+     * interpreter stamps a fresh id per command invocation; [fork] copies
+     * it so a tool's grandchildren share the tool's scope. Null until set —
+     * recorded as scope 0 ("unscoped") on any access made before then.
+     */
+    public var traceScopeId: Long?
+
     /** Process start time, ms since epoch (or session start — TBD). */
     public val startTimeMillis: Long
 
