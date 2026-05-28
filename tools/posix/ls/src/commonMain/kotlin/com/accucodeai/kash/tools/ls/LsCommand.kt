@@ -11,6 +11,7 @@ import com.accucodeai.kash.api.ansi.AnsiStyler
 import com.accucodeai.kash.api.ansi.ColorMode
 import com.accucodeai.kash.api.io.writeLine
 import com.accucodeai.kash.api.io.writeUtf8
+import com.accucodeai.kash.fs.DirWalkGuard
 import com.accucodeai.kash.fs.FileNotFound
 import com.accucodeai.kash.fs.FileStat
 import com.accucodeai.kash.fs.FileType
@@ -104,7 +105,18 @@ public class LsCommand :
             if (fileStats.isNotEmpty() || idx > 0) ctx.stdout.writeLine("")
             if (multiHeader) ctx.stdout.writeLine("$operand:")
             try {
-                listDir(Paths.resolve(ctx.process.cwd, operand), operand, opts, now, tz, ctx, styler, palette)
+                listDir(
+                    Paths.resolve(ctx.process.cwd, operand),
+                    operand,
+                    opts,
+                    now,
+                    tz,
+                    ctx,
+                    styler,
+                    palette,
+                    depth = 0,
+                    guard = DirWalkGuard(ctx.process.fs),
+                )
             } catch (_: NotADirectory) {
                 ctx.stderr.writeUtf8("ls: cannot access '$operand': Not a directory\n")
                 exit = 2
@@ -122,6 +134,8 @@ public class LsCommand :
         ctx: CommandContext,
         styler: AnsiStyler,
         palette: LsColors,
+        depth: Int,
+        guard: DirWalkGuard,
     ) {
         val raw =
             ctx.process.fs.listStat(absPath) +
@@ -143,10 +157,14 @@ public class LsCommand :
                 if (d.type != FileType.DIRECTORY) continue
                 val nm = d.path.substringAfterLast('/')
                 if (nm == "." || nm == "..") continue
+                // Don't recurse into symlinked dirs (GNU ls -R) — and never
+                // into a cycle. The entry still appears in this dir's listing
+                // above; we just don't open it as a recursed section.
+                if (!guard.shouldDescend(d.path, depth + 1)) continue
                 ctx.stdout.writeLine("")
                 val child = if (displayPath.endsWith('/')) "$displayPath$nm" else "$displayPath/$nm"
                 ctx.stdout.writeLine("$child:")
-                listDir(d.path, child, opts, now, tz, ctx, styler, palette)
+                listDir(d.path, child, opts, now, tz, ctx, styler, palette, depth + 1, guard)
             }
         }
     }

@@ -7,6 +7,7 @@ import com.accucodeai.kash.api.CommandResult
 import com.accucodeai.kash.api.CommandSpec
 import com.accucodeai.kash.api.CommandTag
 import com.accucodeai.kash.api.io.writeUtf8
+import com.accucodeai.kash.fs.DirWalkGuard
 import com.accucodeai.kash.fs.FileNotFound
 import com.accucodeai.kash.fs.FileStat
 import com.accucodeai.kash.fs.FileType
@@ -288,7 +289,8 @@ public class CpCommand :
                     destAbs
                 }
             try {
-                if (!copyOne(ctx, opts, src, srcAbs, destRaw, effectiveDest)) {
+                val guard = DirWalkGuard(ctx.process.fs, followSymlinks = opts.followSymlinks)
+                if (!copyOne(ctx, opts, src, srcAbs, destRaw, effectiveDest, depth = 0, guard = guard)) {
                     anyError = true
                 }
             } catch (e: Exception) {
@@ -310,6 +312,8 @@ public class CpCommand :
         srcAbs: String,
         destDisplay: String,
         destAbs: String,
+        depth: Int,
+        guard: DirWalkGuard,
     ): Boolean {
         // Existence and stat of source.
         val srcStat: FileStat =
@@ -334,7 +338,13 @@ public class CpCommand :
                     ctx.stderr.writeUtf8("cp: -r not specified; omitting directory '$srcDisplay'\n")
                     return false
                 }
-                return copyDir(ctx, opts, srcDisplay, srcAbs, destDisplay, destAbs)
+                // Don't recurse into a followed symlinked dir that would form a
+                // cycle (or past the depth backstop). Under -L this is the loop
+                // vector; the command-line operand (depth 0) is always copied.
+                if (depth > 0 && !guard.shouldDescend(srcAbs, depth)) {
+                    return true
+                }
+                return copyDir(ctx, opts, srcDisplay, srcAbs, destDisplay, destAbs, depth, guard)
             }
 
             FileType.SYMLINK -> {
@@ -451,6 +461,8 @@ public class CpCommand :
         srcAbs: String,
         destDisplay: String,
         destAbs: String,
+        depth: Int,
+        guard: DirWalkGuard,
     ): Boolean {
         // Create destination directory if it doesn't exist; if it exists as
         // a file we error.
@@ -493,7 +505,17 @@ public class CpCommand :
             val childSrcDisplay = "$displayPrefix$name"
             val childDestDisplay = "$destDisplayPrefix$name"
             try {
-                if (!copyOne(ctx, opts, childSrcDisplay, childSrcAbs, childDestDisplay, childDestAbs)) {
+                if (!copyOne(
+                        ctx,
+                        opts,
+                        childSrcDisplay,
+                        childSrcAbs,
+                        childDestDisplay,
+                        childDestAbs,
+                        depth + 1,
+                        guard,
+                    )
+                ) {
                     ok = false
                 }
             } catch (e: SymlinkLoop) {

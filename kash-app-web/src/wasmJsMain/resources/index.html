@@ -2,7 +2,12 @@
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <!-- Mobile viewport: lock zoom (pinch / double-tap would break the
+         cell-grid math), and `interactive-widget=resizes-content` so the
+         soft keyboard resizes the visual viewport rather than overlaying
+         it (we mirror that height onto the body in MobileSupport.kt). -->
+    <meta name="viewport"
+          content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, interactive-widget=resizes-content">
     <title>Kash: Browser Terminal</title>
     <!-- Cross-origin isolation for static hosts (e.g. GitHub Pages) that can't
          set COOP/COEP response headers. This service worker re-injects them so
@@ -25,6 +30,12 @@
             overflow: hidden;
             background: #0b0b0b;
             font-family: ui-monospace, "SF Mono", "Cascadia Mono", Menlo, Consolas, monospace;
+            /* Own all touch gestures ourselves — no browser pan/zoom or
+               pull-to-refresh. The terminal's touch handlers (tap to focus,
+               drag to scroll) live in KashTerminalApp. */
+            touch-action: none;
+            overscroll-behavior: none;
+            -webkit-text-size-adjust: 100%;
         }
     </style>
 </head>

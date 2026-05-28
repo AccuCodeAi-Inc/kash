@@ -14,6 +14,7 @@ import com.accucodeai.kash.api.io.readUtf8DelimitedOrNull
 import com.accucodeai.kash.api.io.writeLine
 import com.accucodeai.kash.api.io.writeUtf8
 import com.accucodeai.kash.api.util.matchGlob
+import com.accucodeai.kash.fs.FileType
 import com.accucodeai.kash.fs.Paths
 import com.accucodeai.kash.shared.regex.LinearRegex
 
@@ -200,6 +201,9 @@ internal suspend fun runGrep(
                     parsed.opts.exclude,
                     parsed.opts.includeDir,
                     parsed.opts.excludeDir,
+                    follow = parsed.dereferenceRecursive,
+                    visited = mutableSetOf(),
+                    depth = 0,
                 )
             }
             out
@@ -296,6 +300,11 @@ internal sealed class GrepSource {
 
 private class BrokenPipeMarker : RuntimeException()
 
+/** Hard backstop on recursion depth — terminates even if a cycle slips past
+ *  the symlink guard below (e.g. an FS that doesn't report symlinks via
+ *  statLink). 200 is far deeper than any real source tree. */
+private const val MAX_RECURSION_DEPTH = 200
+
 private suspend fun walkRecursive(
     ctx: CommandContext,
     displayPath: String,
@@ -305,7 +314,13 @@ private suspend fun walkRecursive(
     exclude: List<String>,
     includeDir: List<String>,
     excludeDir: List<String>,
+    /** -R / --dereference-recursive: follow symlinks discovered in the walk. */
+    follow: Boolean,
+    /** Resolved targets of symlinks already followed — breaks cycles under -R. */
+    visited: MutableSet<String>,
+    depth: Int,
 ) {
+    if (depth > MAX_RECURSION_DEPTH) return
     if (!ctx.process.fs.exists(resolvedPath)) return
     if (!ctx.process.fs.isDirectory(resolvedPath)) {
         val base = displayPath.substringAfterLast('/')
@@ -318,13 +333,45 @@ private suspend fun walkRecursive(
     val resBase = if (resolvedPath == "/") "/" else "$resolvedPath/"
     for (entry in ctx.process.fs.list(resolvedPath)) {
         val childRes = "$resBase$entry"
+        // Symlink discipline (matches GNU grep): a symlink encountered DURING
+        // the walk is followed only under -R, never under -r. Command-line
+        // operands are always followed — they reach here as the root call, not
+        // as a listed entry, so this skip doesn't touch them. Under -R we guard
+        // against cycles: a self-referential link (e.g. `/a/b -> /a`) would
+        // otherwise recurse forever.
+        val isSymlink =
+            runCatching {
+                ctx.process.fs
+                    .statLink(childRes)
+                    .type == FileType.SYMLINK
+            }.getOrDefault(false)
+        if (isSymlink) {
+            if (!follow) continue
+            val target =
+                runCatching { Paths.resolve(resolvedPath, ctx.process.fs.readSymlink(childRes)) }
+                    .getOrNull() ?: continue
+            // Already followed a link to this target → cycle; stop.
+            if (!visited.add(target)) continue
+        }
         // --exclude-dir / --include-dir apply to descended directory basenames
         // only; the explicitly-passed root is never filtered.
         if (ctx.process.fs.isDirectory(childRes)) {
             if (excludeDir.any { matchGlob(it, entry) }) continue
             if (includeDir.isNotEmpty() && includeDir.none { matchGlob(it, entry) }) continue
         }
-        walkRecursive(ctx, "$dispBase$entry", childRes, out, include, exclude, includeDir, excludeDir)
+        walkRecursive(
+            ctx,
+            "$dispBase$entry",
+            childRes,
+            out,
+            include,
+            exclude,
+            includeDir,
+            excludeDir,
+            follow,
+            visited,
+            depth + 1,
+        )
     }
 }
 
@@ -639,6 +686,8 @@ internal data class ParsedArgs(
     val suppressFileErrors: Boolean,
     /** -d skip / --directories=skip: silently drop directory operands. */
     val skipDirectories: Boolean = false,
+    /** -R / --dereference-recursive: follow symlinks found during the walk. */
+    val dereferenceRecursive: Boolean = false,
 )
 
 /**
@@ -666,6 +715,7 @@ internal fun parseArgs(
     var suppressFilename = false
     var forceFilename = false
     var recursive = false
+    var dereferenceRecursive = false
     var suppressFileErrors = false
     var wholeLine = false
     var wordRegexp = false
@@ -784,8 +834,13 @@ internal fun parseArgs(
                     forceFilename = true
                 }
 
-                "--recursive", "--dereference-recursive" -> {
+                "--recursive" -> {
                     recursive = true
+                }
+
+                "--dereference-recursive" -> {
+                    recursive = true
+                    dereferenceRecursive = true
                 }
 
                 "--no-messages" -> {
@@ -953,8 +1008,13 @@ internal fun parseArgs(
                         forceFilename = true
                     }
 
-                    'r', 'R' -> {
+                    'r' -> {
                         recursive = true
+                    }
+
+                    'R' -> {
+                        recursive = true
+                        dereferenceRecursive = true
                     }
 
                     's' -> {
@@ -1121,5 +1181,6 @@ internal fun parseArgs(
         recursive = recursive,
         suppressFileErrors = suppressFileErrors,
         skipDirectories = skipDirectories,
+        dereferenceRecursive = dereferenceRecursive,
     )
 }

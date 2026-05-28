@@ -11,6 +11,7 @@ import com.accucodeai.kash.api.io.writeBytes
 import com.accucodeai.kash.api.io.writeLine
 import com.accucodeai.kash.api.io.writeUtf8
 import com.accucodeai.kash.api.util.matchGlob
+import com.accucodeai.kash.fs.DirWalkGuard
 import com.accucodeai.kash.fs.FileSystem
 import com.accucodeai.kash.fs.Paths
 
@@ -71,7 +72,7 @@ public class FindCommand :
                 aggregateExit = 1
                 continue
             }
-            walk(ctx.process.fs, ctx.process.cwd, root, 0, program, ctx, onError)
+            walk(ctx.process.fs, ctx.process.cwd, root, 0, program, ctx, onError, DirWalkGuard(ctx.process.fs))
         }
 
         // Flush any pending `-exec ... +` batches.
@@ -109,6 +110,7 @@ public class FindCommand :
         program: FindProgram,
         ctx: CommandContext,
         onError: (Int) -> Unit,
+        guard: DirWalkGuard,
     ) {
         if (program.maxDepth != null && depth > program.maxDepth) return
         val absPath = Paths.resolve(cwd, displayPath)
@@ -116,7 +118,11 @@ public class FindCommand :
         val shouldEvaluate = program.minDepth == null || depth >= program.minDepth
         val pruned = if (shouldEvaluate) program.evaluate(displayPath, absPath, isDir, ctx, onError) else false
         if (pruned) return
-        if (isDir) {
+        // Descend only into real directories. A symlinked directory found
+        // during the walk is evaluated above but NOT entered (GNU's default
+        // -P behaviour), which also makes a symlink cycle terminate. The
+        // command-line operand itself (depth 0) is always followed.
+        if (isDir && (depth == 0 || guard.shouldDescend(absPath, depth))) {
             val children =
                 try {
                     fs.list(absPath)
@@ -127,7 +133,7 @@ public class FindCommand :
                 }
             for (child in children) {
                 val childDisplay = if (displayPath == "/") "/$child" else "$displayPath/$child"
-                walk(fs, cwd, childDisplay, depth + 1, program, ctx, onError)
+                walk(fs, cwd, childDisplay, depth + 1, program, ctx, onError, guard)
             }
         }
     }

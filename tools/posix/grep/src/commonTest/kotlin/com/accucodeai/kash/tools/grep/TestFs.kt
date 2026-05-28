@@ -5,20 +5,50 @@ import com.accucodeai.kash.api.io.SuspendSink
 import com.accucodeai.kash.api.io.SuspendSource
 import com.accucodeai.kash.api.io.asSuspendSink
 import com.accucodeai.kash.api.io.asSuspendSource
+import com.accucodeai.kash.fs.FileStat
 import com.accucodeai.kash.fs.FileSystem
+import com.accucodeai.kash.fs.FileType
 import com.accucodeai.kash.test.bareCommandContext
 import kotlinx.io.Buffer
 import kotlinx.io.readByteArray
 import kotlinx.io.writeString
 
-/** Minimal in-memory FS that models files and directories. */
-internal class TestFs : FileSystem {
+/** Minimal in-memory FS that models files, directories, and (one-hop) symlinks. */
+internal open class TestFs : FileSystem {
     private val files = mutableMapOf<String, ByteArray>()
     private val dirs = mutableSetOf("/")
 
-    override fun exists(path: String) = files.containsKey(path) || dirs.contains(path)
+    /** path → target. One-hop resolution is enough for the recursion tests. */
+    private val symlinks = mutableMapOf<String, String>()
 
-    override fun isDirectory(path: String) = dirs.contains(path)
+    /** Test helper: register a symlink at [link] pointing at [target]. */
+    fun addSymlink(
+        link: String,
+        target: String,
+    ) {
+        symlinks[link] = target
+        ensureParents(link)
+    }
+
+    override fun statLink(path: String): FileStat =
+        if (symlinks.containsKey(path)) {
+            FileStat(
+                path = path,
+                type = FileType.SYMLINK,
+                size = 0,
+                mtimeEpochSeconds = 0,
+                mode = 0,
+                symlinkTarget = symlinks[path],
+            )
+        } else {
+            stat(path)
+        }
+
+    override fun readSymlink(path: String): String = symlinks[path] ?: error("not a symlink: $path")
+
+    override fun exists(path: String) = files.containsKey(path) || dirs.contains(path) || symlinks.containsKey(path)
+
+    override fun isDirectory(path: String) = dirs.contains(path) || (symlinks[path]?.let { dirs.contains(it) } ?: false)
 
     override fun source(path: String): SuspendSource {
         val b = Buffer()
@@ -65,19 +95,13 @@ internal class TestFs : FileSystem {
     }
 
     override fun list(path: String): List<String> {
-        val base = if (path == "/") "/" else "$path/"
+        // Follow a symlinked directory one hop to its target.
+        val real = symlinks[path] ?: path
+        val base = if (real == "/") "/" else "$real/"
         val out = mutableSetOf<String>()
-        for (f in files.keys) {
-            if (f.startsWith(base)) {
-                val rest = f.substring(base.length)
-                val firstSeg = rest.substringBefore('/')
-                if (firstSeg.isNotEmpty()) out.add(firstSeg)
-            }
-        }
-        for (d in dirs) {
-            if (d.startsWith(base) && d != path) {
-                val rest = d.substring(base.length)
-                val firstSeg = rest.substringBefore('/')
+        for (key in files.keys + dirs + symlinks.keys) {
+            if (key.startsWith(base) && key != real) {
+                val firstSeg = key.substring(base.length).substringBefore('/')
                 if (firstSeg.isNotEmpty()) out.add(firstSeg)
             }
         }
@@ -111,13 +135,18 @@ internal class TestFs : FileSystem {
     }
 }
 
-internal fun ctxFor(stdin: String = ""): Triple<CommandContext, Buffer, Buffer> {
+internal fun ctxFor(stdin: String = ""): Triple<CommandContext, Buffer, Buffer> = ctxForFs(TestFs(), stdin)
+
+internal fun ctxForFs(
+    fs: FileSystem,
+    stdin: String = "",
+): Triple<CommandContext, Buffer, Buffer> {
     val inBuf = Buffer().also { it.writeString(stdin) }
     val outBuf = Buffer()
     val errBuf = Buffer()
     val ctx =
         bareCommandContext(
-            fs = TestFs(),
+            fs = fs,
             env = mutableMapOf(),
             cwd = "/",
             stdin = inBuf.asSuspendSource(),

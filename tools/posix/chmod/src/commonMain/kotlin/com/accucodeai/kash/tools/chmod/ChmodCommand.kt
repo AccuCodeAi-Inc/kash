@@ -7,6 +7,7 @@ import com.accucodeai.kash.api.CommandResult
 import com.accucodeai.kash.api.CommandSpec
 import com.accucodeai.kash.api.CommandTag
 import com.accucodeai.kash.api.io.writeUtf8
+import com.accucodeai.kash.fs.DirWalkGuard
 import com.accucodeai.kash.fs.FileNotFound
 import com.accucodeai.kash.fs.FileType
 import com.accucodeai.kash.fs.Paths
@@ -90,7 +91,7 @@ public class ChmodCommand :
         for (operand in paths) {
             val resolved = Paths.resolve(ctx.process.cwd, operand)
             try {
-                applyTo(ctx, resolved, modeSpec, recursive)
+                applyTo(ctx, resolved, modeSpec, recursive, depth = 0, guard = DirWalkGuard(ctx.process.fs))
             } catch (e: ModeParseError) {
                 ctx.stderr.writeUtf8("chmod: invalid mode: '$modeSpec'\n")
                 return CommandResult(exitCode = 2)
@@ -110,13 +111,21 @@ public class ChmodCommand :
         path: String,
         modeSpec: String,
         recursive: Boolean,
+        depth: Int,
+        guard: DirWalkGuard,
     ) {
         val stat = ctx.process.fs.stat(path)
         val newMode = computeMode(stat.mode, modeSpec)
         ctx.process.fs.chmod(path, newMode)
-        if (recursive && stat.type == FileType.DIRECTORY) {
+        // Recurse only into real directories — never descend a symlinked dir
+        // discovered during the walk (GNU chmod -R default), which also makes
+        // a symlink cycle terminate. The command-line operand (depth 0) is
+        // followed regardless.
+        if (recursive && stat.type == FileType.DIRECTORY &&
+            (depth == 0 || guard.shouldDescend(path, depth))
+        ) {
             for (child in ctx.process.fs.listStat(path)) {
-                applyTo(ctx, child.path, modeSpec, recursive)
+                applyTo(ctx, child.path, modeSpec, recursive, depth + 1, guard)
             }
         }
     }

@@ -13,6 +13,7 @@ import com.accucodeai.kash.api.ansi.Sgr
 import com.accucodeai.kash.api.io.writeLine
 import com.accucodeai.kash.api.io.writeUtf8
 import com.accucodeai.kash.api.util.matchGlob
+import com.accucodeai.kash.fs.DirWalkGuard
 import com.accucodeai.kash.fs.FileNotFound
 import com.accucodeai.kash.fs.FileStat
 import com.accucodeai.kash.fs.FileType
@@ -92,7 +93,7 @@ public class TreeCommand :
             // classifies — that's emitted bare (matches upstream).
             ctx.stdout.writeLine(renderHeader(operand, rootStat, opts, styler))
             if (rootStat.type == FileType.DIRECTORY) {
-                val counts = walk(abs, operand, 1, opts, ctx, styler, prefix = "")
+                val counts = walk(abs, operand, 1, opts, ctx, styler, prefix = "", guard = DirWalkGuard(ctx.process.fs))
                 dirs += counts.dirs
                 files += counts.files
             }
@@ -125,6 +126,7 @@ public class TreeCommand :
         ctx: CommandContext,
         styler: AnsiStyler,
         prefix: String,
+        guard: DirWalkGuard,
     ): Counts {
         val counts = Counts()
         if (opts.maxDepth != null && depth > opts.maxDepth) return counts
@@ -188,15 +190,19 @@ public class TreeCommand :
 
             if (entry.type == FileType.DIRECTORY) {
                 counts.dirs++
-                val newPrefix =
-                    if (opts.noIndent) {
-                        ""
-                    } else {
-                        prefix + if (isLast) GAP else PIPE
-                    }
-                val sub = walk(entry.path, displayName, depth + 1, opts, ctx, styler, newPrefix)
-                counts.dirs += sub.dirs
-                counts.files += sub.files
+                // Recurse only into real directories — a symlinked dir is shown
+                // above but not descended (avoids symlink-cycle loops).
+                if (guard.shouldDescend(entry.path, depth + 1)) {
+                    val newPrefix =
+                        if (opts.noIndent) {
+                            ""
+                        } else {
+                            prefix + if (isLast) GAP else PIPE
+                        }
+                    val sub = walk(entry.path, displayName, depth + 1, opts, ctx, styler, newPrefix, guard)
+                    counts.dirs += sub.dirs
+                    counts.files += sub.files
+                }
             } else {
                 counts.files++
             }

@@ -7,7 +7,9 @@ import androidx.compose.animation.core.LinearOutSlowInEasing
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
@@ -18,6 +20,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.unit.dp
@@ -68,6 +71,57 @@ public fun KashTerminalApp(
 ) {
     val snapshot by runner.terminal.state.collectAsState()
     val scope = rememberCoroutineScope()
+
+    // Touch / mobile support. On a touch device the soft keyboard can't be
+    // raised by a canvas, so we route input through a hidden DOM proxy (see
+    // MobileSupport.kt). Everything below is inert on desktop.
+    val isTouch = remember { isTouchDevice() }
+    // Sticky-Ctrl latch for the accessory bar: when set, the next scalar
+    // (tapped symbol OR soft-keyboard letter) is folded into Ctrl-<x>.
+    val ctrlLatched = remember { mutableStateOf(false) }
+    var keyboardVisible by remember { mutableStateOf(false) }
+
+    // Feed a single Unicode scalar, honouring the sticky-Ctrl latch: a
+    // latched letter becomes Key.Ctrl; any other latched scalar is sent
+    // verbatim and clears the latch.
+    fun feedScalar(cp: Int) {
+        if (ctrlLatched.value) {
+            ctrlLatched.value = false
+            if (cp in 0x41..0x5A || cp in 0x61..0x7A) {
+                runner.feedKey(Key.Ctrl(cp.toChar().uppercaseChar()))
+                return
+            }
+        }
+        runner.feedKey(Key.Char(cp))
+    }
+
+    fun feedText(text: String) {
+        forEachScalar(text) { cp -> feedScalar(cp) }
+    }
+
+    // The hidden input proxy. Created once per runner on touch devices; its
+    // beforeinput/composition handlers feed typed text + Enter/Backspace.
+    val mobileInput =
+        remember(runner) {
+            if (!isTouch) {
+                null
+            } else {
+                MobileInputProxy(
+                    onText = { t -> feedText(t) },
+                    onKey = { k -> runner.feedKey(k) },
+                    onFocusChange = { focused -> keyboardVisible = focused },
+                )
+            }
+        }
+    DisposableEffect(mobileInput) {
+        if (mobileInput != null) installMobileViewportFix()
+        onDispose { mobileInput?.dispose() }
+    }
+    // Drop the soft keyboard when a modal opens, so it doesn't sit over the
+    // dialog. Re-summoning is a tap away once the dialog closes.
+    LaunchedEffect(inputEnabled) {
+        if (!inputEnabled) mobileInput?.blur()
+    }
 
     // Scroll position as a fractional rows-above-live offset, for smooth
     // sub-row scrolling. `scrollTarget` is where the user wants to be;
@@ -227,7 +281,15 @@ public fun KashTerminalApp(
                 // paste-event dispatch and leave us with nothing.
             } else {
                 val key = browserKeyToKash(event)
-                if (key != null) {
+                // On touch devices the proxy textarea owns printable text,
+                // Enter, Backspace and Delete via `beforeinput` (keydown is
+                // unreliable for those on soft keyboards). When this keydown
+                // came from the proxy, skip exactly those so we don't
+                // double-fire — navigation/control keys (arrows, Tab, Esc,
+                // Ctrl-combos) still flow through here.
+                val skipForProxy =
+                    key != null && isMobileProxyEvent(event) && isProxyHandledByBeforeInput(key)
+                if (key != null && !skipForProxy) {
                     cursorBlinkOn = true
                     if (key == Key.Named.ESC && selection != null) {
                         selection = null
@@ -454,6 +516,62 @@ public fun KashTerminalApp(
         }
     }
 
+    // Touch gestures (touch devices only). One-finger drag scrolls the
+    // scrollback; a tap (negligible movement) focuses the hidden input
+    // proxy, raising the soft keyboard. `touch-action: none` in index.html
+    // disables the browser's own pan/zoom so these own the gesture
+    // outright — no passive-listener / preventDefault dance needed.
+    if (isTouch && mobileInput != null) {
+        DisposableEffect(runner, inputEnabled) {
+            if (!inputEnabled) return@DisposableEffect onDispose { }
+            var lastY = 0.0
+            var startX = 0.0
+            var startY = 0.0
+            var moved = false
+            val onStart: (Event) -> Unit = { raw ->
+                if (jsTouchCount(raw) == 1) {
+                    lastY = jsFirstTouchY(raw)
+                    startX = jsFirstTouchX(raw)
+                    startY = lastY
+                    moved = false
+                }
+            }
+            val onMove: (Event) -> Unit = { raw ->
+                if (jsTouchCount(raw) == 1 && !snapshot.onAlt) {
+                    val y = jsFirstTouchY(raw)
+                    val dyTotal = y - startY
+                    val dxTotal = jsFirstTouchX(raw) - startX
+                    // ~8px slop before a gesture counts as a drag (so a
+                    // slightly-smeared tap still focuses the keyboard).
+                    if (!moved && (kotlin.math.abs(dyTotal) > 8.0 || kotlin.math.abs(dxTotal) > 8.0)) {
+                        moved = true
+                    }
+                    if (moved) {
+                        // Finger down → reveal older content (offset grows),
+                        // matching native touch scrolling.
+                        val cellPx = cellH.toDouble().coerceAtLeast(1.0)
+                        val deltaRows = (y - lastY) / cellPx
+                        scrollTo((scrollTarget.toDouble() + deltaRows).toFloat(), false)
+                        lastY = y
+                    }
+                }
+            }
+            val onEnd: (Event) -> Unit = { _ ->
+                // A tap (no meaningful drag) raises the keyboard. Must run
+                // inside this gesture callback or the browser refuses.
+                if (!moved) mobileInput.focus()
+            }
+            document.addEventListener("touchstart", onStart)
+            document.addEventListener("touchmove", onMove)
+            document.addEventListener("touchend", onEnd)
+            onDispose {
+                document.removeEventListener("touchstart", onStart)
+                document.removeEventListener("touchmove", onMove)
+                document.removeEventListener("touchend", onEnd)
+            }
+        }
+    }
+
     // File-drop zone over the terminal canvas. Only registered when a
     // drop host is wired in (i.e. when called from the workspace).
     if (dropHost != null) {
@@ -483,25 +601,57 @@ public fun KashTerminalApp(
                 .background(BACKGROUND)
                 .padding(start = 8.dp),
     ) {
-        TerminalCanvas(
-            snapshot = snapshot,
-            scrollOffsetRows = scrollAnim.value,
-            cursorBlinkOn = cursorBlinkOn,
-            selection = selection,
-            fontSizeSp = fontSizeSp,
-            background = BACKGROUND,
-            foreground = FOREGROUND,
-            onCellSize = { cols, rows -> runner.resizeViewport(cols, rows) },
-            onCellMetrics = { w, h ->
-                cellW = w
-                cellH = h
-            },
-            onCanvasOrigin = { x, y ->
-                canvasOriginX = x
-                canvasOriginY = y
-            },
-            modifier = Modifier.fillMaxSize(),
-        )
+        Column(modifier = Modifier.fillMaxSize()) {
+            TerminalCanvas(
+                snapshot = snapshot,
+                scrollOffsetRows = scrollAnim.value,
+                cursorBlinkOn = cursorBlinkOn,
+                selection = selection,
+                fontSizeSp = fontSizeSp,
+                background = BACKGROUND,
+                foreground = FOREGROUND,
+                onCellSize = { cols, rows -> runner.resizeViewport(cols, rows) },
+                onCellMetrics = { w, h ->
+                    cellW = w
+                    cellH = h
+                },
+                onCanvasOrigin = { x, y ->
+                    canvasOriginX = x
+                    canvasOriginY = y
+                },
+                // Weight (not fillMaxSize) so the accessory bar below can
+                // claim its own height and the canvas re-measures to fewer
+                // rows — keeping the prompt clear of the bar + keyboard.
+                modifier = Modifier.fillMaxWidth().weight(1f),
+            )
+            // Accessory key strip — only while the soft keyboard is up and
+            // no modal is open (otherwise its keys would feed the terminal
+            // behind the dialog).
+            if (isTouch && mobileInput != null && keyboardVisible && inputEnabled) {
+                MobileAccessoryBar(
+                    ctrlLatched = ctrlLatched.value,
+                    onToggleCtrl = { ctrlLatched.value = !ctrlLatched.value },
+                    onKey = { k ->
+                        cursorBlinkOn = true
+                        if (scrollTarget > 0f && !isNavigationKey(k)) scrollTo(0f, true)
+                        runner.feedKey(k)
+                    },
+                    onScalar = { cp ->
+                        cursorBlinkOn = true
+                        if (scrollTarget > 0f) scrollTo(0f, true)
+                        feedScalar(cp)
+                    },
+                    onHideKeyboard = { mobileInput.blur() },
+                )
+            }
+        }
+        // Summon-keyboard button while the keyboard is hidden on touch.
+        if (isTouch && mobileInput != null && !keyboardVisible && inputEnabled) {
+            KeyboardFab(
+                onClick = { mobileInput.focus() },
+                modifier = Modifier.align(Alignment.BottomEnd).padding(16.dp),
+            )
+        }
     }
 }
 
@@ -528,6 +678,15 @@ private fun handleScrollKey(
         }
     }
 }
+
+// Keys the mobile proxy's `beforeinput` handler is responsible for. When a
+// keydown carrying one of these originates from the proxy textarea, the
+// document-level handler ignores it so the two paths don't double-fire.
+private fun isProxyHandledByBeforeInput(key: Key): Boolean =
+    when (key) {
+        is Key.Char, Key.Named.ENTER, Key.Named.BACKSPACE, Key.Named.DELETE -> true
+        else -> false
+    }
 
 private fun isNavigationKey(key: Key): Boolean =
     when (key) {

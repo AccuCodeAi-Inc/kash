@@ -7,7 +7,9 @@ import com.accucodeai.kash.api.io.SuspendSource
 import com.accucodeai.kash.api.io.asSuspendSink
 import com.accucodeai.kash.api.io.asSuspendSource
 import com.accucodeai.kash.api.io.writeUtf8
+import com.accucodeai.kash.fs.FileStat
 import com.accucodeai.kash.fs.FileSystem
+import com.accucodeai.kash.fs.FileType
 import com.accucodeai.kash.test.bareCommandContext
 import kotlinx.coroutines.test.runTest
 import kotlinx.io.Buffer
@@ -29,12 +31,33 @@ private class TreeFs(
     private val dirs: Set<String>,
     private val files: Map<String, ByteArray>,
     private val children: Map<String, List<String>>,
+    private val symlinks: Map<String, String> = emptyMap(),
 ) : FileSystem {
-    override fun exists(path: String): Boolean = path in dirs || path in files
+    override fun exists(path: String): Boolean = path in dirs || path in files || path in symlinks
 
-    override fun isDirectory(path: String) = path in dirs
+    override fun isDirectory(path: String) = path in dirs || (symlinks[path]?.let { it in dirs } ?: false)
 
     override fun list(path: String): List<String> = children[path] ?: emptyList()
+
+    override fun statLink(path: String): FileStat =
+        if (path in symlinks) {
+            FileStat(path, FileType.SYMLINK, 0, 0, 0b111_111_111, symlinkTarget = symlinks[path])
+        } else {
+            stat(path)
+        }
+
+    override fun readSymlink(path: String): String = symlinks[path] ?: error("not a symlink: $path")
+
+    override fun stat(path: String): FileStat {
+        val isDir = path in dirs
+        return FileStat(
+            path = path,
+            type = if (isDir) FileType.DIRECTORY else FileType.REGULAR,
+            size = files[path]?.size?.toLong() ?: 0L,
+            mtimeEpochSeconds = 0L,
+            mode = if (isDir) 0b111_101_101 else 0b110_100_100,
+        )
+    }
 
     override fun source(path: String): SuspendSource {
         val b = Buffer()
@@ -416,5 +439,26 @@ class FindCommandTest {
             val rc = FindCommand().run(listOf("/a", "-mtime", "abc"), c)
             assertEquals(2, rc.exitCode)
             assertEquals(true, err.readString().contains("-mtime"))
+        }
+
+    @Test fun recursive_does_not_follow_symlink_cycle() =
+        runTest {
+            // /a holds a real file `f` and a symlink `self` -> /a (a cycle).
+            val fs =
+                TreeFs(
+                    dirs = setOf("/a"),
+                    files = mapOf("/a/f" to ByteArray(0)),
+                    children = mapOf("/a" to listOf("f", "self")),
+                    symlinks = mapOf("/a/self" to "/a"),
+                )
+            val (c, out, _) = ctx(fs)
+            val rc = FindCommand().run(listOf("/a"), c)
+            assertEquals(0, rc.exitCode)
+            // The walk terminates and the symlink is listed once, NOT descended
+            // into (no /a/self/self... explosion).
+            val lines = out.readString().trim().split("\n")
+            assertEquals(1, lines.count { it == "/a/self" })
+            assertEquals(true, lines.contains("/a/f"))
+            assertEquals(true, lines.none { it.startsWith("/a/self/") })
         }
 }

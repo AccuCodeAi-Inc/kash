@@ -940,4 +940,55 @@ class GrepCommandTest {
             assertEquals(2, rc.exitCode)
             assertTrue(err.readString().contains("banana"))
         }
+
+    // ---------- recursion / symlink safety ----------
+
+    @Test fun recursive_does_not_follow_symlinked_dir_under_dash_r() =
+        runTest {
+            val fs = TestFs()
+            val (ctx, out, _) = ctxForFs(fs)
+            fs.writeBytes("/d/f.txt", "needle\n".encodeToByteArray())
+            fs.addSymlink("/d/self", "/d") // self-referential dir symlink
+            val rc = GrepCommandSpec().run(listOf("-r", "needle", "/d"), ctx)
+            assertEquals(0, rc.exitCode)
+            val text = out.readString()
+            // -r never follows a symlink found during the walk: the real file
+            // is searched, the symlink is skipped (and we don't loop forever).
+            assertTrue(text.contains("/d/f.txt:needle"), "got: $text")
+            assertTrue(!text.contains("/d/self"), "should not descend symlink: $text")
+        }
+
+    @Test fun recursive_dereference_follows_symlink_but_breaks_cycle() =
+        runTest {
+            val fs = TestFs()
+            val (ctx, out, _) = ctxForFs(fs)
+            fs.writeBytes("/d/f.txt", "needle\n".encodeToByteArray())
+            fs.addSymlink("/d/self", "/d")
+            // -R follows symlinks; the cycle guard must still terminate.
+            val rc = GrepCommandSpec().run(listOf("-R", "needle", "/d"), ctx)
+            assertEquals(0, rc.exitCode)
+            assertTrue(out.readString().contains("/d/f.txt:needle"))
+        }
+
+    @Test fun recursive_terminates_on_unbounded_directory_tree() =
+        runTest {
+            // An FS whose every directory contains one subdir forever — the
+            // shape a symlink cycle presents to the walker. The depth backstop
+            // must make this terminate instead of hanging.
+            val (ctx, _, _) = ctxForFs(InfiniteDirFs())
+            val rc = GrepCommandSpec().run(listOf("-r", "needle", "/loop"), ctx)
+            // No files exist, so no match — the point is that it RETURNS.
+            assertEquals(1, rc.exitCode)
+        }
+}
+
+/** FS presenting an unbounded directory tree: every path under /loop is a
+ *  directory containing a single subdir "x". Models what a symlink cycle looks
+ *  like to the recursive walker, to prove the walk terminates. */
+private class InfiniteDirFs : TestFs() {
+    override fun exists(path: String) = path == "/" || path == "/loop" || path.startsWith("/loop/")
+
+    override fun isDirectory(path: String) = exists(path)
+
+    override fun list(path: String) = if (isDirectory(path)) listOf("x") else emptyList()
 }

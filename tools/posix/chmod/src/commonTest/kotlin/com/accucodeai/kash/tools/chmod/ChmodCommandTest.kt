@@ -122,7 +122,7 @@ class ChmodCommandTest {
     @Test fun symbolicAddExec() =
         runTest {
             val fs = InMemoryFs()
-            fs.writeBytes("/work/script", "#!/bin/sh".encodeToByteArray())
+            fs.writeBytes("/work/script", "#!/bin/sh".encodeToByteArray(), mode = 0b110_100_100) // 644
             val (c, _, _) = ctx(fs)
             val r = ChmodCommand().run(listOf("+x", "script"), c)
             assertEquals(0, r.exitCode)
@@ -200,9 +200,9 @@ class ChmodCommandTest {
     @Test fun nonRecursiveLeavesChildrenAlone() =
         runTest {
             val fs = InMemoryFs()
-            fs.writeBytes("/work/top", "x".encodeToByteArray()) // 644
+            fs.writeBytes("/work/top", "x".encodeToByteArray(), mode = 0b110_100_100) // 644
             fs.mkdirs("/work/sub")
-            fs.writeBytes("/work/sub/inner", "y".encodeToByteArray()) // 644
+            fs.writeBytes("/work/sub/inner", "y".encodeToByteArray(), mode = 0b110_100_100) // 644
             val (c, _, _) = ctx(fs)
             ChmodCommand().run(listOf("700", "/work"), c)
             assertEquals(0b111_000_000, fs.stat("/work").mode)

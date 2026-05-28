@@ -9,6 +9,7 @@ import com.accucodeai.kash.api.CommandTag
 import com.accucodeai.kash.api.io.readAllBytes
 import com.accucodeai.kash.api.io.writeUtf8
 import com.accucodeai.kash.diff.splitLines
+import com.accucodeai.kash.fs.DirWalkGuard
 import com.accucodeai.kash.fs.FileNotFound
 import com.accucodeai.kash.fs.NotADirectory
 import com.accucodeai.kash.fs.Paths
@@ -198,7 +199,17 @@ public class DiffCommand :
         val dir2 = abs2 != null && fs.exists(abs2) && fs.isDirectory(abs2)
 
         return if (dir1 && dir2) {
-            diffDirs(p1, p2, abs1, abs2, opts, ctx)
+            diffDirs(
+                p1,
+                p2,
+                abs1,
+                abs2,
+                opts,
+                ctx,
+                depth = 0,
+                guard1 = DirWalkGuard(ctx.process.fs),
+                guard2 = DirWalkGuard(ctx.process.fs),
+            )
         } else if (dir1 || dir2) {
             // One is a dir, the other a file: compare file against dir/basename.
             diffFileVsDir(p1, p2, abs1, abs2, dir1, opts, ctx)
@@ -320,6 +331,9 @@ public class DiffCommand :
         abs2: String,
         opts: Opts,
         ctx: CommandContext,
+        depth: Int,
+        guard1: DirWalkGuard,
+        guard2: DirWalkGuard,
     ): CommandResult {
         val fs = ctx.process.fs
         val names1 = fs.list(abs1).map { Paths.basename(it) }.toSet()
@@ -347,8 +361,27 @@ public class DiffCommand :
                     val d2 = fs.isDirectory(c2)
                     when {
                         d1 && d2 -> {
-                            if (opts.recursive) {
-                                val rc = diffDirs("$label1/$name", "$label2/$name", c1, c2, opts, ctx)
+                            // Recurse only into real subdirectories on BOTH
+                            // sides. A symlinked dir (or a cycle, or past the
+                            // depth backstop) is reported as a common subdir
+                            // rather than descended — which keeps `diff -r`
+                            // from looping on a symlink cycle.
+                            if (opts.recursive &&
+                                guard1.shouldDescend(c1, depth + 1) &&
+                                guard2.shouldDescend(c2, depth + 1)
+                            ) {
+                                val rc =
+                                    diffDirs(
+                                        "$label1/$name",
+                                        "$label2/$name",
+                                        c1,
+                                        c2,
+                                        opts,
+                                        ctx,
+                                        depth + 1,
+                                        guard1,
+                                        guard2,
+                                    )
                                 worst = maxOf(worst, rc.exitCode)
                             } else {
                                 ctx.stdout.writeUtf8("Common subdirectories: $c1 and $c2\n")
