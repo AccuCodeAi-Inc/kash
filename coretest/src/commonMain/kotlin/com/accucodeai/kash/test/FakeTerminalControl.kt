@@ -49,6 +49,22 @@ public class FakeTerminalControl(
 
     override suspend fun readKey(): Key = keys.receive()
 
+    override fun drainKeys(keep: (Key) -> Boolean): List<Key> {
+        // Mirror the production impls so tests can exercise strict
+        // turn-taking: non-blocking try-receive in a loop, re-queue
+        // keepers in original order, return the discarded list.
+        val keepers = mutableListOf<Key>()
+        val discarded = mutableListOf<Key>()
+        while (true) {
+            val r = keys.tryReceive()
+            if (!r.isSuccess) break
+            val k = r.getOrNull() ?: continue
+            if (keep(k)) keepers += k else discarded += k
+        }
+        for (k in keepers) keys.trySend(k)
+        return discarded
+    }
+
     override suspend fun write(s: String) {
         output.append(s)
     }

@@ -70,15 +70,20 @@ public fun RawSource.readUtf8LineOrNull(): String? = readUtf8DelimitedOrNull('\n
 
 public fun RawSource.readUtf8DelimitedOrNull(delim: Byte): String? {
     val chunk = Buffer()
-    val out = StringBuilder()
+    val accum = Buffer()
     var any = false
     while (true) {
         val n = readAtMostTo(chunk, 1L)
         if (n == -1L) break
         any = true
         val b = chunk.readByte()
-        if (b == delim) return out.toString()
-        out.append(b.toInt().toChar())
+        if (b == delim) return accum.readString()
+        // Accumulate raw UTF-8 bytes and decode once at the delimiter/EOF via
+        // Buffer.readString — NOT per byte. A prior `out.append(b.toInt()
+        // .toChar())` sign-extended any byte ≥ 0x80 (byte 0xC3 → U+FFC3) and
+        // mangled every multibyte char. Mirrors the SuspendSource overload in
+        // SuspendIo.kt, which was fixed first.
+        accum.writeByte(b)
     }
-    return if (any) out.toString() else null
+    return if (any) accum.readString() else null
 }

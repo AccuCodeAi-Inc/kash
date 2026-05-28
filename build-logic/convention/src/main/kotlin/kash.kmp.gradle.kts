@@ -28,30 +28,23 @@ kotlin {
     // Multiplatform for Web targets wasmJs specifically (see :kash-app-web,
     // Phase 3). Modules that have JVM-only `actual`s must supply a wasmJsMain
     // counterpart (see shared/regex, tools/ext/{base64,shasum,uuidgen}).
+    //
+    // commonTest *compiles* against wasmJs by default — the legacy
+    // `kotlinx.coroutines.runBlocking` pattern (which doesn't exist on
+    // wasmJs; it's single-threaded — no blocking primitive) has been
+    // migrated to `kotlinx.coroutines.test.runTest`. Browser test
+    // EXECUTION (`wasmJsBrowserTest` via Karma) is still opt-in per
+    // module: spinning up headless Chrome on every `:check` is
+    // heavyweight, and most modules don't have wasmJs-specific tests
+    // worth the cost yet. Modules that want browser tests re-enable
+    // with `tasks.named("wasmJsBrowserTest") { enabled = true }`
+    // and add wasmJsTest sources (see :tools:kash:python3-pyodide).
     @OptIn(org.jetbrains.kotlin.gradle.ExperimentalWasmDsl::class)
     wasmJs {
         browser {
-            // Tests in commonTest use `kotlinx.coroutines.runBlocking`, which
-            // does not exist on wasmJs (single-threaded; blocking isn't a
-            // thing). Rewriting those tests to `kotlinx.coroutines.test.runTest`
-            // is its own project — for now we compile production code for
-            // wasmJs but skip test compilation. Phase 2 (Pyodide) and Phase 3
-            // (Compose-for-Web) will introduce wasmJs-specific tests in
-            // wasmJsTest only.
             testTask { enabled = false }
         }
     }
-
-    // Disable the wasmJs test-compile task itself so `check` doesn't drag
-    // commonTest sources through a wasmJs compile that will never succeed
-    // until the runBlocking -> runTest migration happens.
-    tasks
-        .matching {
-            it.name == "compileTestKotlinWasmJs" ||
-                it.name == "wasmJsTest" ||
-                it.name == "wasmJsBrowserTest" ||
-                it.name == "wasmJsNodeTest"
-        }.configureEach { enabled = false }
 
     sourceSets {
         all {

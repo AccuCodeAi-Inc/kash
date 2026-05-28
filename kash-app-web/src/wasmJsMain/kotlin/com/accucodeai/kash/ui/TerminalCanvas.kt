@@ -92,6 +92,14 @@ public fun TerminalCanvas(
     onCanvasOrigin: (xPxCss: Float, yPxCss: Float) -> Unit = { _, _ -> },
     modifier: Modifier = Modifier,
 ) {
+    // Primary terminal face: JetBrains Mono (static Regular + Bold instances —
+    // we ship static, not variable, since Skiko/Wasm mis-renders variable
+    // fonts). It covers Latin / Greek / Cyrillic / box-drawing. CJK glyphs it
+    // lacks fall back to Noto Sans Mono CJK SC, which `KashWorkspace` preloads
+    // into the Skiko fallback collection before the terminal first paints
+    // (Compose Web has no system fonts, so the fallback chain is whatever we
+    // preload). Both faces are monospace, so the grid's per-column pixel
+    // pinning stays exact across the fallback boundary.
     val terminalFont =
         FontFamily(
             Font(Res.font.JetBrainsMono_Regular, weight = FontWeight.Normal, style = FontStyle.Normal),
@@ -240,7 +248,15 @@ private fun DrawScope.drawTerminal(
 
             // Selection overlay (under glyphs so text stays readable).
             if (selection != null && !snapshot.onAlt) {
-                paintSelection(selection, firstAbsRow, viewportRows, cellW, cellH, foreground)
+                paintSelection(
+                    selection,
+                    firstAbsRow,
+                    viewportRows,
+                    cellW,
+                    cellH,
+                    foreground,
+                    rowSources,
+                )
             }
 
             // Glyph pass.
@@ -254,15 +270,27 @@ private fun DrawScope.drawTerminal(
     // Cursor — only when fully anchored on live content (offset == 0).
     if (snapshot.cursorVisible && cursorBlinkOn && n == 0 && frac == 0f) {
         val cRow = snapshot.cursorRow.coerceIn(0, vis.size - 1)
-        val cCol = snapshot.cursorCol.coerceAtLeast(0)
+        var cCol = snapshot.cursorCol.coerceAtLeast(0)
+        // If the cursor landed on a continuation cell of a wide char,
+        // snap to the leader so the inverted rect covers both halves
+        // and the glyph paints right. Symmetric: if it's already on
+        // the leader, paint a 2-cell-wide rect.
+        val rowCells = vis.getOrNull(cRow)
+        val landed = rowCells?.getOrNull(cCol)
+        if (landed?.width == 0 && cCol > 0) cCol--
+        val cellAtCursor = rowCells?.getOrNull(cCol)
+        val cursorCells = if (cellAtCursor?.width == 2) 2 else 1
         val viewRow = (sb.size + cRow) - firstAbsRow
         if (viewRow in 0 until viewportRows) {
             val topLeft = Offset(cCol * cellW, viewRow * cellH)
-            drawRect(color = foreground, topLeft = topLeft, size = Size(cellW, cellH))
-            val ch = renderableChar(vis.getOrNull(cRow)?.getOrNull(cCol)?.ch ?: ' ')
-            if (ch != ' ') {
+            drawRect(color = foreground, topLeft = topLeft, size = Size(cellW * cursorCells, cellH))
+            val text = renderableCellText(cellAtCursor?.ch ?: ' ', cellAtCursor?.extras ?: "")
+            if (text != " ") {
                 val layout =
-                    measurer.measure(AnnotatedString(ch.toString()), style.copy(color = background))
+                    measurer.measure(
+                        AnnotatedString(text),
+                        style.copy(color = background),
+                    )
                 drawText(layout, topLeft = topLeft)
             }
         }
@@ -294,6 +322,7 @@ private fun DrawScope.paintSelection(
     cellW: Float,
     cellH: Float,
     foreground: Color,
+    rowSources: Array<Array<Cell>?>,
 ) {
     // Normalize ordering.
     val (a0, c0, a1, c1) =
@@ -311,8 +340,22 @@ private fun DrawScope.paintSelection(
         // Selection on a row spans cols [lo .. hi].
         val lo = if (absRow == a0) c0 else 0
         val hi = if (absRow == a1) c1 else Int.MAX_VALUE
+        // When the end column [hi] sits on a wide leader, extend the
+        // tint to cover its continuation cell so the highlighted span
+        // visually wraps the whole glyph. Without this the right half
+        // of a wide char at the selection's tail end paints unhighlighted
+        // even though `selectionText` copies the char in full.
+        val rowCells = rowSources.getOrNull(viewRow + 1)
+        val hiEffective =
+            if (hi != Int.MAX_VALUE && rowCells != null && hi in rowCells.indices &&
+                rowCells[hi].width == 2
+            ) {
+                hi + 1
+            } else {
+                hi
+            }
         val pxLo = lo * cellW
-        val pxHi = if (hi == Int.MAX_VALUE) size.width else (hi + 1) * cellW
+        val pxHi = if (hiEffective == Int.MAX_VALUE) size.width else (hiEffective + 1) * cellW
         drawRect(
             color = tint,
             topLeft = Offset(pxLo, viewRow * cellH),
@@ -391,12 +434,60 @@ private fun renderableChar(c: Char): Char =
     }
 
 /**
- * Walk the row in runs of cells that share a [CellStyle] and measure each
- * run with a single [TextMeasurer.measure] call instead of one per cell.
- * For a 24×80 viewport that drops per-frame measure() count from ~1920 to
- * O(rows × style-changes-per-row) — typically <100. JetBrains Mono is
- * monospace so a multi-char layout lines up cell-for-cell at `start *
- * cellW`. Trailing default-style spaces are trimmed (nothing to paint).
+ * Render text for one cell (`ch + extras`), preserving valid astral scalars.
+ * A high+low surrogate pair is a real codepoint (emoji / CJK Ext-B) and is
+ * kept verbatim so the shaper can fall back to the emoji / CJK font; lone
+ * surrogates and control codes still fold to `·` via [renderableChar].
+ *
+ * [renderableChar] operates on a single `Char`, so it would fold *both*
+ * halves of an emoji. Cells that can carry a surrogate pair (the wide /
+ * combining-mark / cursor cells) must render through here instead; a batched
+ * width-1 run is BMP-only and stays on [renderableChar].
+ */
+private fun renderableCellText(
+    ch: Char,
+    extras: String,
+): String {
+    if (extras.isEmpty()) return renderableChar(ch).toString()
+    val s = ch.toString() + extras
+    return buildString {
+        var i = 0
+        while (i < s.length) {
+            val c0 = s[i]
+            if (c0.isHighSurrogate() && i + 1 < s.length && s[i + 1].isLowSurrogate()) {
+                append(c0)
+                append(s[i + 1])
+                i += 2
+            } else {
+                append(renderableChar(c0))
+                i++
+            }
+        }
+    }
+}
+
+/**
+ * Walk the row in runs of cells that share a [CellStyle], batching
+ * consecutive width-1 cells into one [TextMeasurer.measure] +
+ * [drawText] call so we don't pay 1920 per-cell measures per frame on
+ * a 24×80 viewport.
+ *
+ * Wide characters (width=2) **break the batch and draw individually**
+ * at their own `col × cellW` origin. This is the same approach every
+ * serious terminal renderer takes (Warp, Contour, xterm.js WebGL,
+ * alacritty, kitty): the fallback CJK font's "double-width" glyph
+ * advance is *meant* to equal `2 × cellW`, but font hinting and
+ * sub-pixel rounding leave a sub-pixel mismatch that accumulates
+ * across a long CJK run, producing a visible drift between glyph
+ * positions and the cell grid (and therefore the selection rect,
+ * cursor box, etc.). Pinning each wide glyph to its grid column
+ * eliminates the accumulation — only the per-glyph rendering inside
+ * the 2-cell box can shift, and the next glyph starts fresh at the
+ * correct origin. ASCII runs still batch normally; in pure-Latin
+ * rows the cost is identical to the old single-call path.
+ *
+ * Trailing default-style spaces are trimmed off the tail of any
+ * batched run (nothing to paint).
  */
 private fun DrawScope.paintRowGlyphs(
     row: Array<Cell>,
@@ -410,13 +501,65 @@ private fun DrawScope.paintRowGlyphs(
     dim: Boolean,
 ) {
     val y = viewRow * cellH
+
+    /** Resolve the row-cell style → effective TextStyle for this paint. */
+    fun resolveStyle(s: CellStyle): TextStyle {
+        val fg =
+            when {
+                s.inverse -> s.bg ?: defaultBg
+                s.fg != null -> s.fg
+                else -> defaultFg
+            }
+        val drawColor = if (dim || s.dim) fg.copy(alpha = 0.55f) else fg
+        return base.copy(
+            color = drawColor,
+            fontWeight = if (s.bold) FontWeight.Bold else FontWeight.Normal,
+            textDecoration = if (s.underline) TextDecoration.Underline else null,
+        )
+    }
+
     val sb = StringBuilder()
     var c = 0
     while (c < row.size) {
-        val runStyle = row[c].style
+        val here = row[c]
+        // Width=0 continuation cells are owned by the leader at c-1 —
+        // they paint nothing of their own. Skip past them.
+        if (here.width == 0) {
+            c++
+            continue
+        }
+        if (here.width == 2) {
+            // Pin the wide glyph to this grid column. One measure +
+            // one drawText per wide char — the only way to keep the
+            // cell grid and CJK glyph positions perfectly aligned
+            // across a long row. Trailing combining marks (extras)
+            // ride along with the base glyph.
+            val style = resolveStyle(here.style)
+            val text = renderableCellText(here.ch, here.extras)
+            val layout = measurer.measure(AnnotatedString(text), style)
+            drawText(layout, topLeft = Offset(c * cellW, y))
+            c += 2
+            continue
+        }
+        // width == 1: batch all consecutive same-style width-1 cells.
+        // A cell carrying combining-mark `extras` could in principle
+        // stay in the batch (Skia shapes them with the preceding
+        // base char), but if the cluster grows past a single grapheme
+        // its layout advance can drift from cellW the same way wide
+        // chars do. Cells with non-empty extras are therefore drawn
+        // individually, just like width=2 cells.
+        if (here.extras.isNotEmpty()) {
+            val style = resolveStyle(here.style)
+            val text = renderableCellText(here.ch, here.extras)
+            val layout = measurer.measure(AnnotatedString(text), style)
+            drawText(layout, topLeft = Offset(c * cellW, y))
+            c++
+            continue
+        }
+        val runStyle = here.style
         val runStart = c
         sb.clear()
-        while (c < row.size && row[c].style == runStyle) {
+        while (c < row.size && row[c].width == 1 && row[c].extras.isEmpty() && row[c].style == runStyle) {
             sb.append(renderableChar(row[c].ch))
             c++
         }
@@ -427,20 +570,7 @@ private fun DrawScope.paintRowGlyphs(
             if (end == 0) continue
             sb.setLength(end)
         }
-        val fg =
-            when {
-                runStyle.inverse -> runStyle.bg ?: defaultBg
-                runStyle.fg != null -> runStyle.fg
-                else -> defaultFg
-            }
-        // Faint: row-level dim (scrollback/inactive) OR per-cell SGR 2.
-        val drawColor = if (dim || runStyle.dim) fg.copy(alpha = 0.55f) else fg
-        val style =
-            base.copy(
-                color = drawColor,
-                fontWeight = if (runStyle.bold) FontWeight.Bold else FontWeight.Normal,
-                textDecoration = if (runStyle.underline) TextDecoration.Underline else null,
-            )
+        val style = resolveStyle(runStyle)
         val layout = measurer.measure(AnnotatedString(sb.toString()), style)
         drawText(layout, topLeft = Offset(runStart * cellW, y))
     }

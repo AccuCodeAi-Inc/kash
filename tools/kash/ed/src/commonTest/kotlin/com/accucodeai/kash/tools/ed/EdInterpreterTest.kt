@@ -4,7 +4,6 @@ import com.accucodeai.kash.api.io.asSuspendSink
 import com.accucodeai.kash.api.io.asSuspendSource
 import com.accucodeai.kash.fs.InMemoryFs
 import com.accucodeai.kash.test.bareCommandContext
-import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.test.runTest
 import kotlinx.io.Buffer
 import kotlinx.io.readString
@@ -47,18 +46,18 @@ class EdInterpreterTest {
         val fs: InMemoryFs,
     )
 
-    private fun writeFile(
+    private suspend fun writeFile(
         fs: InMemoryFs,
         path: String,
         text: String,
     ) {
-        runBlocking { fs.writeBytes(path, text.encodeToByteArray()) }
+        fs.writeBytes(path, text.encodeToByteArray())
     }
 
-    private fun readFile(
+    private suspend fun readFile(
         fs: InMemoryFs,
         path: String,
-    ): String = runBlocking { fs.readBytes(path).decodeToString() }
+    ): String = fs.readBytes(path).decodeToString()
 
     @Test fun appendAndWrite() =
         runTest {

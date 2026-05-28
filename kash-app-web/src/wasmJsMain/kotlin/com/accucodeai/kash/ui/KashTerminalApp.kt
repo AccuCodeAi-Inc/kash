@@ -376,7 +376,7 @@ public fun KashTerminalApp(
         fun toAbsCell(e: MouseEvent): Pair<Int, Int> {
             val localX = (e.clientX - canvasOriginX.toDouble()).coerceAtLeast(0.0)
             val localY = (e.clientY - canvasOriginY.toDouble()).coerceAtLeast(0.0)
-            val col = floor(localX / cellW.toDouble()).toInt().coerceAtLeast(0)
+            var col = floor(localX / cellW.toDouble()).toInt().coerceAtLeast(0)
             val snap = snapshot
             // Must mirror drawTerminal's viewport window exactly, otherwise
             // the selection anchor lands on the wrong absolute row. The
@@ -399,6 +399,22 @@ public fun KashTerminalApp(
                     (totalRows - n - snap.rows).coerceAtLeast(0)
                 }
             val absRow = (firstAbsRow + viewRow).coerceIn(0, totalRows - 1)
+            // Snap to leader on wide chars: a click on the right half of
+            // a wide glyph lands in the continuation cell (width=0) by
+            // pixel math, but the user means to select the whole char.
+            // Resolving to the leader here keeps the saved selection
+            // range on grid-aligned, atomic positions — selection tint
+            // and copy both expect that.
+            val rowCells =
+                when {
+                    absRow < snap.scrollback.size -> snap.scrollback.getOrNull(absRow)
+                    else -> snap.visible.getOrNull(absRow - snap.scrollback.size)
+                }
+            if (rowCells != null && col in rowCells.indices &&
+                rowCells[col].width == 0 && col > 0
+            ) {
+                col--
+            }
             return absRow to col
         }
         val onDown: (Event) -> Unit = { rawEvent ->

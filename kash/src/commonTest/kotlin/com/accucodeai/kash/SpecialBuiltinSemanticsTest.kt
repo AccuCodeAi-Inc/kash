@@ -34,10 +34,14 @@ class SpecialBuiltinSemanticsTest {
 
     @Test fun failedSpecialBuiltinAbortsNonInteractiveScript() =
         runTest {
-            // `shift 99` fails (shift count out of range) — that's a special
-            // builtin failure, which in a non-interactive shell terminates
-            // the script before reaching `echo unreachable`.
-            val r = Kash().exec("shift 99; echo unreachable")
+            // `exec NONEXISTENT` is a special-builtin failure that
+            // terminates a non-interactive shell. Verified against bash:
+            //   bash -c 'exec /no/such/cmd; echo unreachable'
+            //   → "cannot execute" (exit 126), no "unreachable".
+            // Plain non-zero exits from special builtins (e.g. `shift 99`
+            // out of range) do NOT abort in any bash mode — see
+            // NON_ABORTING_SPECIAL_BUILTINS in Interpreter.kt.
+            val r = Kash().exec("exec /no/such/cmd; echo unreachable")
             assertEquals(false, r.stdout.contains("unreachable"))
             assertTrue(r.exitCode != 0, "expected non-zero exit, got ${r.exitCode}")
         }

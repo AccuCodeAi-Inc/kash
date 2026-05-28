@@ -11,7 +11,7 @@ graalpy = "25.0.2"
 antlrKotlin = "1.0.10"
 kotlincryptoHash = "0.7.0"
 pyodide = "0.29.4"
-composeMultiplatform = "1.7.3"
+composeMultiplatform = "1.8.0"
 # Eclipse JGit — pure-Java git implementation. EDL 1.0 (BSD-3-Clause).
 # Used by :tools:kash:git-jgit to back the kash git tool against a
 # real Repository object (in-memory or on-disk). JVM-only.
@@ -22,10 +22,11 @@ jgit = "7.6.0.202603022253-r"
 # would otherwise hit stderr on every CLI start. 2.0.x to match jgit's
 # slf4j-api transitive.
 slf4j = "2.0.16"
-# Ktor — Kotlin Multiplatform HTTP client. JVM-only inside kash today
-# (loaded by :shared:net under jvmMain); the wasmJs `actual` of
-# KashKtorClient throws, so no ktor-js engine is pulled in.
-ktor = "3.0.3"
+# Ktor — Kotlin Multiplatform HTTP client. JVM via the CIO engine
+# (loaded by :shared:net); wasmJs via the JS engine for the agent's
+# OpenAI streaming client (see :tools:ai:agent). The :shared:net surface
+# still doesn't leak ktor types, so its own wasmJs `actual` throws.
+ktor = "3.3.3"
 # Apache Commons Compress — bzip2 streams (pure Java) for :tools:ext:bzip2.
 commonsCompress = "1.28.0"
 # Tukaani XZ for Java — pure-Java XZ / LZMA codec, BSD 0-clause.
@@ -34,10 +35,6 @@ tukaaniXz = "1.12"
 # io.airlift:aircompressor — pure-Java zstd implementation (used by Trino/Presto).
 # Apache-2.0. Pulled in by :tools:ext:zstd. JVM-only; wasmJs gets a stub.
 aircompressor = "2.0.2"
-# JetBrains Koog — multiplatform agent framework. Apache-2.0. Backs the
-# `agent` tool in :tools:ai:agent (OpenAI-compatible LLM client with
-# custom baseUrl support for LM Studio / Ollama / OpenAI, streaming).
-koog = "1.0.0"
 # cryptography-kotlin (whyoleg). Apache-2.0. Multiplatform crypto API
 # (JCA-backed on JVM via cryptography-provider-jdk; SubtleCrypto-backed on
 # wasmJs via cryptography-provider-webcrypto). Used by :tools:forensics:openssl
@@ -92,9 +89,10 @@ graalvmPythonEmbedding = { module = "org.graalvm.python:python-embedding", versi
 jgit = { module = "org.eclipse.jgit:org.eclipse.jgit", version.ref = "jgit" }
 slf4jNop = { module = "org.slf4j:slf4j-nop", version.ref = "slf4j" }
 
-# Ktor HTTP client + CIO engine. JVM-only inside kash (see :shared:net).
+# Ktor HTTP client + CIO engine (JVM) + JS engine (wasmJs).
 ktorClientCore = { module = "io.ktor:ktor-client-core", version.ref = "ktor" }
 ktorClientCio = { module = "io.ktor:ktor-client-cio", version.ref = "ktor" }
+ktorClientJs = { module = "io.ktor:ktor-client-js", version.ref = "ktor" }
 
 # Apache Commons Compress — pure-Java bzip2 streams. JVM-only; wasmJs stub.
 commonsCompress = { module = "org.apache.commons:commons-compress", version.ref = "commonsCompress" }
@@ -104,11 +102,6 @@ tukaaniXz = { module = "org.tukaani:xz", version.ref = "tukaaniXz" }
 
 # io.airlift:aircompressor — pure-Java zstd. Apache-2.0. JVM-only.
 aircompressor = { module = "io.airlift:aircompressor", version.ref = "aircompressor" }
-
-# Koog — JetBrains' Kotlin Multiplatform agent framework. Umbrella artifact;
-# pulls in the OpenAI-compatible LLM client (with custom baseUrl override
-# for LM Studio / Ollama), the streaming API, and the tool registry.
-koogAgents = { module = "ai.koog:koog-agents", version.ref = "koog" }
 
 # cryptography-kotlin. Apache-2.0. JVM + wasmJs providers wrap JCA / SubtleCrypto.
 cryptographyCore = { module = "dev.whyoleg.cryptography:cryptography-core", version.ref = "cryptographyKotlin" }

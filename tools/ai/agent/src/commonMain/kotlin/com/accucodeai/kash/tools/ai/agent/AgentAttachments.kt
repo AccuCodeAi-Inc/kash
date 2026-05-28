@@ -1,10 +1,10 @@
 package com.accucodeai.kash.tools.ai.agent
 
-import ai.koog.prompt.message.AttachmentContent
-import ai.koog.prompt.message.AttachmentSource
-import ai.koog.prompt.message.MessagePart
 import com.accucodeai.kash.api.AttachmentSink
 import com.accucodeai.kash.fs.FileSystem
+import com.accucodeai.kash.tools.ai.agent.openai.ContentPart
+import kotlin.io.encoding.Base64
+import kotlin.io.encoding.ExperimentalEncodingApi
 
 /**
  * Per-session attachment registry for [AgentSession]. Implements
@@ -42,6 +42,17 @@ internal class AgentAttachments(
         val path: String,
     )
 
+    /**
+     * The pieces of one user turn after attachment expansion. [text] is the
+     * (possibly attachment-decorated) prompt body; [images] is the set of
+     * image content parts to ride alongside it. The session feeds both into
+     * [com.accucodeai.kash.tools.ai.agent.openai.userMessage].
+     */
+    data class UserParts(
+        val text: String,
+        val images: List<ContentPart.Image>,
+    )
+
     /** Snapshot of the registry, in insertion order. 1-based to match `[attachment N]`. */
     fun snapshot(): List<DroppedAttachment> = items.toList()
 
@@ -54,10 +65,10 @@ internal class AgentAttachments(
     }
 
     /**
-     * Drain queued `KASH_ATTACHMENT_N` env bindings. [AgentSession]
-     * applies these to the subshell at a quiescent point (top of a turn)
-     * — never from `add()`, which runs on the drop-handler coroutine and
-     * could reenter a tool call mid-flight.
+     * Drain queued `KASH_ATTACHMENT_N` env bindings. [AgentSession] applies
+     * these to the subshell at a quiescent point (top of a turn) — never
+     * from `add()`, which runs on the drop-handler coroutine and could
+     * reenter a tool call mid-flight.
      */
     fun drainPendingExports(): List<EnvBinding> {
         if (pendingExports.isEmpty()) return emptyList()
@@ -80,24 +91,24 @@ internal class AgentAttachments(
     }
 
     /**
-     * Build the multipart user-message body for one turn.
+     * Build the per-turn user-message pieces (text + image parts).
      *
-     *  - Scan [userText] for `[attachment N]` markers and resolve each to
-     *    an entry. Unknown indices stay as literal text (the model sees
-     *    them verbatim and can complain).
-     *  - Prepend an `Attachments:` block to the text part listing each
+     *  - Scan [userText] for `[attachment N]` markers and resolve each to an
+     *    entry. Unknown indices stay as literal text (the model sees them
+     *    verbatim and can complain).
+     *  - Prepend an `Attachments:` block to the text body listing each
      *    referenced file's name, mime, size, and absolute path. The model
      *    uses the path with `read_file` / `shell_exec` for decryption,
      *    parsing, etc.
-     *  - For image attachments, also emit a [ContentPart.Image] holding
-     *    the raw bytes — Koog base64-encodes per the OpenAI vision wire
-     *    format. Non-vision backends will reject; the agent's
-     *    `describeError` HTTP-400 hint covers that.
+     *  - For image attachments, emit a [ContentPart.Image] holding the
+     *    base64-encoded bytes — the OpenAI vision wire format. Non-vision
+     *    backends will reject; the agent's `describeError` HTTP-400 hint
+     *    covers that.
      *  - Files dropped but NOT referenced by `[attachment N]` are
      *    preserved for future turns ("look at this one too" on the next
      *    prompt works).
      */
-    suspend fun buildUserParts(userText: String): List<MessagePart.RequestPart> {
+    suspend fun buildUserParts(userText: String): UserParts {
         val referencedIndices =
             ATTACHMENT_REF
                 .findAll(userText)
@@ -106,7 +117,7 @@ internal class AgentAttachments(
                 .distinct()
                 .toList()
         if (referencedIndices.isEmpty()) {
-            return listOf(MessagePart.Text(userText))
+            return UserParts(text = userText, images = emptyList())
         }
         val referenced = referencedIndices.map { it to items[it - 1] }
         val inlinedText = mutableMapOf<Int, String>()
@@ -141,7 +152,7 @@ internal class AgentAttachments(
                 append('\n')
                 append(userText)
             }
-        val parts = mutableListOf<MessagePart.RequestPart>(MessagePart.Text(expanded))
+        val images = mutableListOf<ContentPart.Image>()
         for ((_, a) in referenced) {
             if (!a.mimeType.startsWith("image/")) continue
             val bytes =
@@ -150,9 +161,9 @@ internal class AgentAttachments(
                 } catch (_: Throwable) {
                     continue
                 }
-            parts += imagePart(bytes, a.mimeType, a.fileName)
+            images += imagePart(bytes, a.mimeType)
         }
-        return parts
+        return UserParts(text = expanded, images = images)
     }
 
     companion object {
@@ -162,32 +173,22 @@ internal class AgentAttachments(
         val ATTACHMENT_REF: Regex = Regex("""\[attachment (\d+)]""")
 
         /**
-         * Build a Koog multimodal image part from raw bytes. [format] is the
-         * mime subtype — Koog's file-extension hint for providers that need
-         * it (Anthropic etc.) — derived by stripping the `image/` prefix and
-         * any `+xml` / `;charset=…` suffix. Shared by the drag-drop attachment
-         * path ([buildUserParts]) and read_file's image-read injection so both
-         * emit identical wire parts.
+         * Build a [ContentPart.Image] from raw bytes. We emit the OpenAI
+         * vision wire shape — a `data:<mime>;base64,<…>` data URL — which
+         * every vision-capable OpenAI-compatible server understands.
+         * Shared by the drag-drop attachment path ([buildUserParts]) and
+         * `read_file`'s image-read injection so both produce identical
+         * wire parts.
          */
+        @OptIn(ExperimentalEncodingApi::class)
         fun imagePart(
             bytes: ByteArray,
             mimeType: String,
-            fileName: String,
-        ): MessagePart.Attachment {
-            val format =
-                mimeType
-                    .substringAfter('/')
-                    .substringBefore(';')
-                    .substringBefore('+')
-                    .ifEmpty { "png" }
-            return MessagePart.Attachment(
-                source =
-                    AttachmentSource.Image(
-                        content = AttachmentContent.Binary.Bytes(bytes),
-                        format = format,
-                        mimeType = mimeType,
-                        fileName = fileName,
-                    ),
+        ): ContentPart.Image {
+            val mime = mimeType.ifEmpty { "image/png" }
+            val b64 = Base64.encode(bytes)
+            return ContentPart.Image(
+                imageUrl = ContentPart.ImageUrl(url = "data:$mime;base64,$b64"),
             )
         }
 

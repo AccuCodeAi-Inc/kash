@@ -13,7 +13,7 @@ import com.accucodeai.kash.fs.InMemoryFs
 import com.accucodeai.kash.test.bareCommandContext
 import com.accucodeai.kash.tools.git.GitCommand
 import com.accucodeai.kash.tools.git.seed.materializeSeed
-import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.test.runTest
 import kotlinx.io.Buffer
 import kotlinx.io.readString
 import kotlin.test.Test
@@ -28,7 +28,7 @@ class PushTest {
         val stderr: String,
     )
 
-    private fun runGit(
+    private suspend fun runGit(
         adapter: GitHostAdapter?,
         fs: InMemoryFs,
         cwd: String,
@@ -45,7 +45,7 @@ class PushTest {
                 stdout = out.asSuspendSink(),
                 stderr = err.asSuspendSink(),
             )
-        val res = runBlocking { GitCommand(adapter).run(args.toList(), ctx) }
+        val res = GitCommand(adapter).run(args.toList(), ctx)
         return Output(res.exitCode, out.readString(), err.readString())
     }
 
@@ -64,7 +64,7 @@ class PushTest {
         }
     }
 
-    private fun adapterWithApplier(
+    private suspend fun adapterWithApplier(
         applier: GitPushApplier,
         resolver: GitObjectResolver = GitObjectResolver { null },
     ): GitHostAdapter =
@@ -82,103 +82,108 @@ class PushTest {
             override val workTreePath: String = "/work"
         }
 
-    @Test fun pushSendsNewCommitsToApplier() {
-        val applier = CapturingApplier()
-        val adapter = adapterWithApplier(applier)
-        val fs = InMemoryFs()
-        fs.mkdirs("/work")
-        runBlocking { materializeSeed(adapter, fs) }
+    @Test fun pushSendsNewCommitsToApplier() =
+        runTest {
+            val applier = CapturingApplier()
+            val adapter = adapterWithApplier(applier)
+            val fs = InMemoryFs()
+            fs.mkdirs("/work")
+            materializeSeed(adapter, fs)
 
-        // Make a local commit on main.
-        runBlocking { fs.writeBytes("/work/README", "edited\n".encodeToByteArray()) }
-        runGit(adapter, fs, "/work", "add", "README")
-        runGit(adapter, fs, "/work", "commit", "-m", "local edit")
+            // Make a local commit on main.
+            fs.writeBytes("/work/README", "edited\n".encodeToByteArray())
+            runGit(adapter, fs, "/work", "add", "README")
+            runGit(adapter, fs, "/work", "commit", "-m", "local edit")
 
-        val localTip = runGit(adapter, fs, "/work", "rev-parse", "HEAD").stdout.trim()
-        val push = runGit(adapter, fs, "/work", "push")
-        assertEquals(0, push.rc, push.stderr)
-        assertTrue(push.stdout.contains("main -> main"), "stdout: ${push.stdout}")
+            val localTip = runGit(adapter, fs, "/work", "rev-parse", "HEAD").stdout.trim()
+            val push = runGit(adapter, fs, "/work", "push")
+            assertEquals(0, push.rc, push.stderr)
+            assertTrue(push.stdout.contains("main -> main"), "stdout: ${push.stdout}")
 
-        // Applier saw a single commit, oldest-first, with all required objects.
-        val req = assertNotNull(applier.lastRequest, "applier never called")
-        assertEquals("main", req.branch)
-        assertEquals(localTip, req.tipSha)
-        assertEquals(1, req.newCommits.size)
-        val bundle = req.newCommits[0]
-        assertEquals(localTip, bundle.commitSha)
-        assertEquals(1, bundle.trees.size)
-        assertEquals(1, bundle.blobs.size)
+            // Applier saw a single commit, oldest-first, with all required objects.
+            val req = assertNotNull(applier.lastRequest, "applier never called")
+            assertEquals("main", req.branch)
+            assertEquals(localTip, req.tipSha)
+            assertEquals(1, req.newCommits.size)
+            val bundle = req.newCommits[0]
+            assertEquals(localTip, bundle.commitSha)
+            assertEquals(1, bundle.trees.size)
+            assertEquals(1, bundle.blobs.size)
 
-        // Tracking ref advanced.
-        val tracking = runGit(adapter, fs, "/work", "rev-parse", "refs/remotes/origin/main").stdout.trim()
-        assertEquals(localTip, tracking)
-    }
+            // Tracking ref advanced.
+            val tracking = runGit(adapter, fs, "/work", "rev-parse", "refs/remotes/origin/main").stdout.trim()
+            assertEquals(localTip, tracking)
+        }
 
-    @Test fun pushUpToDateSkipsApplier() {
-        val applier = CapturingApplier()
-        val adapter = adapterWithApplier(applier)
-        val fs = InMemoryFs()
-        fs.mkdirs("/work")
-        runBlocking { materializeSeed(adapter, fs) }
+    @Test fun pushUpToDateSkipsApplier() =
+        runTest {
+            val applier = CapturingApplier()
+            val adapter = adapterWithApplier(applier)
+            val fs = InMemoryFs()
+            fs.mkdirs("/work")
+            materializeSeed(adapter, fs)
 
-        val out = runGit(adapter, fs, "/work", "push")
-        assertEquals(0, out.rc)
-        assertEquals("Everything up-to-date\n", out.stdout)
-        assertEquals(null, applier.lastRequest)
-    }
+            val out = runGit(adapter, fs, "/work", "push")
+            assertEquals(0, out.rc)
+            assertEquals("Everything up-to-date\n", out.stdout)
+            assertEquals(null, applier.lastRequest)
+        }
 
-    @Test fun pushTwoCommitsBundlesBothOldestFirst() {
-        val applier = CapturingApplier()
-        val adapter = adapterWithApplier(applier)
-        val fs = InMemoryFs()
-        fs.mkdirs("/work")
-        runBlocking { materializeSeed(adapter, fs) }
+    @Test fun pushTwoCommitsBundlesBothOldestFirst() =
+        runTest {
+            val applier = CapturingApplier()
+            val adapter = adapterWithApplier(applier)
+            val fs = InMemoryFs()
+            fs.mkdirs("/work")
+            materializeSeed(adapter, fs)
 
-        runBlocking { fs.writeBytes("/work/README", "v2\n".encodeToByteArray()) }
-        runGit(adapter, fs, "/work", "add", "README")
-        runGit(adapter, fs, "/work", "commit", "-m", "v2")
-        val firstSha = runGit(adapter, fs, "/work", "rev-parse", "HEAD").stdout.trim()
+            fs.writeBytes("/work/README", "v2\n".encodeToByteArray())
+            runGit(adapter, fs, "/work", "add", "README")
+            runGit(adapter, fs, "/work", "commit", "-m", "v2")
+            val firstSha = runGit(adapter, fs, "/work", "rev-parse", "HEAD").stdout.trim()
 
-        runBlocking { fs.writeBytes("/work/README", "v3\n".encodeToByteArray()) }
-        runGit(adapter, fs, "/work", "add", "README")
-        runGit(adapter, fs, "/work", "commit", "-m", "v3")
-        val secondSha = runGit(adapter, fs, "/work", "rev-parse", "HEAD").stdout.trim()
+            fs.writeBytes("/work/README", "v3\n".encodeToByteArray())
+            runGit(adapter, fs, "/work", "add", "README")
+            runGit(adapter, fs, "/work", "commit", "-m", "v3")
+            val secondSha = runGit(adapter, fs, "/work", "rev-parse", "HEAD").stdout.trim()
 
-        runGit(adapter, fs, "/work", "push")
-        val req = assertNotNull(applier.lastRequest)
-        assertEquals(2, req.newCommits.size)
-        // Oldest first: v2 then v3.
-        assertEquals(firstSha, req.newCommits[0].commitSha)
-        assertEquals(secondSha, req.newCommits[1].commitSha)
-    }
+            runGit(adapter, fs, "/work", "push")
+            val req = assertNotNull(applier.lastRequest)
+            assertEquals(2, req.newCommits.size)
+            // Oldest first: v2 then v3.
+            assertEquals(firstSha, req.newCommits[0].commitSha)
+            assertEquals(secondSha, req.newCommits[1].commitSha)
+        }
 
-    @Test fun pushRejectedSurfacesError() {
-        val applier = CapturingApplier()
-        applier.outcome = GitPushOutcome.Rejected("non-fast-forward")
-        val adapter = adapterWithApplier(applier)
-        val fs = InMemoryFs()
-        fs.mkdirs("/work")
-        runBlocking { materializeSeed(adapter, fs) }
+    @Test fun pushRejectedSurfacesError() =
+        runTest {
+            val applier = CapturingApplier()
+            applier.outcome = GitPushOutcome.Rejected("non-fast-forward")
+            val adapter = adapterWithApplier(applier)
+            val fs = InMemoryFs()
+            fs.mkdirs("/work")
+            materializeSeed(adapter, fs)
 
-        runBlocking { fs.writeBytes("/work/README", "edit\n".encodeToByteArray()) }
-        runGit(adapter, fs, "/work", "add", "README")
-        runGit(adapter, fs, "/work", "commit", "-m", "edit")
-        val out = runGit(adapter, fs, "/work", "push")
-        assertEquals(1, out.rc)
-        assertTrue("[rejected]" in out.stderr, out.stderr)
-        assertTrue("non-fast-forward" in out.stderr, out.stderr)
-    }
+            fs.writeBytes("/work/README", "edit\n".encodeToByteArray())
+            runGit(adapter, fs, "/work", "add", "README")
+            runGit(adapter, fs, "/work", "commit", "-m", "edit")
+            val out = runGit(adapter, fs, "/work", "push")
+            assertEquals(1, out.rc)
+            assertTrue("[rejected]" in out.stderr, out.stderr)
+            assertTrue("non-fast-forward" in out.stderr, out.stderr)
+        }
 
-    @Test fun pushWithoutApplierFailsWithNoRemote() {
-        // Local-mode session (no adapter at all).
-        val fs = InMemoryFs()
-        fs.mkdirs("/work")
-        runGit(null, fs, "/work", "init")
-        runBlocking { fs.writeBytes("/work/a", "x".encodeToByteArray()) }
-        runGit(null, fs, "/work", "add", "a")
-        runGit(null, fs, "/work", "commit", "-m", "x")
-        val out = runGit(null, fs, "/work", "push")
-        assertEquals(128, out.rc)
-        assertTrue("no remote configured" in out.stderr, out.stderr)
-    }
+    @Test fun pushWithoutApplierFailsWithNoRemote() =
+        runTest {
+            // Local-mode session (no adapter at all).
+            val fs = InMemoryFs()
+            fs.mkdirs("/work")
+            runGit(null, fs, "/work", "init")
+            fs.writeBytes("/work/a", "x".encodeToByteArray())
+            runGit(null, fs, "/work", "add", "a")
+            runGit(null, fs, "/work", "commit", "-m", "x")
+            val out = runGit(null, fs, "/work", "push")
+            assertEquals(128, out.rc)
+            assertTrue("no remote configured" in out.stderr, out.stderr)
+        }
 }

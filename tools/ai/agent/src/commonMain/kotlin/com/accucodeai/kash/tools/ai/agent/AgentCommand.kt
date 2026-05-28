@@ -10,9 +10,10 @@ import com.accucodeai.kash.api.io.writeUtf8
 
 /**
  * `agent` — interactive LLM agent with shell tool access. TUI in the alt
- * screen, drives a Koog [ai.koog.agents.core.agent.AIAgent] talking to any
- * OpenAI-compatible HTTP endpoint (LM Studio, Ollama, OpenRouter, real
- * OpenAI…). Streams assistant deltas into the history pane in real time.
+ * screen, talks directly to any OpenAI-compatible `/v1/chat/completions`
+ * endpoint (LM Studio, Ollama, OpenRouter, real OpenAI…) over our own
+ * hand-rolled Ktor client. Streams assistant deltas into the history pane
+ * in real time.
  *
  * Refuses cleanly when stdin/stdout aren't a TTY or when no
  * [com.accucodeai.kash.api.terminal.TerminalControl] is available — mirrors
@@ -107,7 +108,6 @@ public class AgentCommand :
         var maxSteps: Int? = null
         var showThinking = true
         var appendReasoning = true
-        var useResponsesApi = false
         var parseThinkTags = true
 
         val positionals = mutableListOf<String>()
@@ -133,10 +133,6 @@ public class AgentCommand :
 
                 a == "--no-reasoning-history" -> {
                     appendReasoning = false
-                }
-
-                a == "--responses" -> {
-                    useResponsesApi = true
                 }
 
                 a == "--no-think-tags" -> {
@@ -238,7 +234,6 @@ public class AgentCommand :
                 maxIterations = effectiveMaxSteps,
                 showThinking = showThinking,
                 appendReasoning = appendReasoning,
-                useResponsesApi = useResponsesApi,
                 parseThinkTags = parseThinkTags,
             ),
         )
@@ -256,8 +251,6 @@ public class AgentCommand :
                 "  --no-thinking       don't display the model's reasoning tokens (shown by default)\n" +
                 "  --no-think-tags     don't parse inline <think>…</think> spans out of the reply\n" +
                 "  --no-reasoning-history  don't echo reasoning back into history (for APIs that reject it)\n" +
-                "  --responses         use the OpenAI Responses endpoint (experimental — Koog 1.0\n" +
-                "                        crashes on reasoning content parts; completions is default)\n" +
                 "  --context-budget N  prompt-token budget before history compaction (default: 250000)\n" +
                 "  --max-steps N       safety cap on tool rounds per turn (default: 1000)\n" +
                 "  -h, --help          show this help\n" +

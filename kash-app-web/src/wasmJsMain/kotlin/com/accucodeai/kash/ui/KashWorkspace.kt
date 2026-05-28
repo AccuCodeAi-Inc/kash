@@ -1,7 +1,7 @@
 @file:OptIn(
     androidx.compose.material3.ExperimentalMaterial3Api::class,
     androidx.compose.ui.ExperimentalComposeUiApi::class,
-    kotlin.js.ExperimentalWasmJsInterop::class,
+    ExperimentalWasmJsInterop::class,
 )
 
 package com.accucodeai.kash.ui
@@ -85,17 +85,26 @@ import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.layout.positionInWindow
 import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.platform.LocalFontFamilyResolver
 import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.DpOffset
 import androidx.compose.ui.unit.dp
 import com.accucodeai.kash.api.CommandRegistry
 import com.accucodeai.kash.fs.sanitizeDropName
 import com.accucodeai.kash.fs.uniqueDropPath
+import com.accucodeai.kash.webres.JetBrainsMono_Bold
+import com.accucodeai.kash.webres.JetBrainsMono_Regular
+import com.accucodeai.kash.webres.NotoColorEmoji
+import com.accucodeai.kash.webres.NotoSansMonoCJKsc_Regular
+import com.accucodeai.kash.webres.Res
 import kotlinx.browser.window
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.conflate
 import kotlinx.coroutines.launch
+import org.jetbrains.compose.resources.Font
+import kotlin.time.Duration.Companion.milliseconds
 
 /**
  * The kash-on-web workspace: a windowed, multi-pane layout that wraps
@@ -145,6 +154,46 @@ public fun KashWorkspace(registry: CommandRegistry) {
     InstallBrowserDropHost(dropHost)
     // Surface dropper status into the workspace's existing flash toast.
     val dropMessage by dropHost.pendingMessage
+
+    // Warm both terminal faces into the Skiko font resolver before the
+    // terminal first paints. Compose Web has NO system fonts, so the glyph-
+    // fallback chain is exactly what we preload here — without this, CJK
+    // would render as tofu because Skiko would have nothing to fall back to
+    // when JetBrains Mono lacks a glyph.
+    //  - JetBrains Mono (Regular + Bold): the primary face, used directly by
+    //    `TerminalCanvas`'s TextStyle. Latin / Greek / Cyrillic / box-drawing.
+    //  - Noto Sans Mono CJK SC (Regular): preloaded as a fallback face. It's
+    //    not referenced by any FontFamily — once in the resolver's collection
+    //    Skiko pulls CJK/kana/hangul glyphs from it automatically. ~16 MB,
+    //    served as a separate composeResources asset next to the .wasm on
+    //    GitHub Pages (caches across deploys, doesn't bloat the binary).
+    //  - Noto Color Emoji (CBDT bitmap): also preloaded as a fallback face,
+    //    so emoji scalars (which the TerminalGrid now keeps intact as one
+    //    cell) shape in color. ~10 MB; same fallback mechanism as the CJK
+    //    face. Needs a cross-origin-isolated page; it's an asset, not in wasm.
+    // `preload(...)` kicks the fetch as the workspace mounts; otherwise the
+    // first text-layout pass would block on the network.
+    // See kash-app-web/THIRD_PARTY_LICENSES/ for the OFL texts (JetBrains
+    // Mono + Noto Sans Mono CJK + Noto Color Emoji).
+    val fontResolver = LocalFontFamilyResolver.current
+    val terminalFont =
+        FontFamily(
+            Font(Res.font.JetBrainsMono_Regular, weight = FontWeight.Normal, style = FontStyle.Normal),
+            Font(Res.font.JetBrainsMono_Bold, weight = FontWeight.Bold, style = FontStyle.Normal),
+        )
+    val cjkFallbackFont =
+        FontFamily(
+            Font(Res.font.NotoSansMonoCJKsc_Regular, weight = FontWeight.Normal, style = FontStyle.Normal),
+        )
+    val emojiFallbackFont =
+        FontFamily(
+            Font(Res.font.NotoColorEmoji, weight = FontWeight.Normal, style = FontStyle.Normal),
+        )
+    LaunchedEffect(terminalFont, cjkFallbackFont, emojiFallbackFont) {
+        runCatching { fontResolver.preload(terminalFont) }
+        runCatching { fontResolver.preload(cjkFallbackFont) }
+        runCatching { fontResolver.preload(emojiFallbackFont) }
+    }
 
     // After any workspace-chrome click we drop focus so subsequent
     // keystrokes (especially Enter) flow to the terminal rather than
@@ -211,7 +260,7 @@ public fun KashWorkspace(registry: CommandRegistry) {
     // isn't guaranteed to fire (force-kill, mobile suspend, OOM).
     LaunchedEffect(workspace) {
         while (true) {
-            delay(30_000)
+            delay(30_000.milliseconds)
             workspace.writeAutosave()
         }
     }

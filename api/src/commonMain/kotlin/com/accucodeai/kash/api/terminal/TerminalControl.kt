@@ -74,6 +74,25 @@ public interface TerminalControl {
     public fun pushKey(key: Key) {
         // No-op default; see kdoc.
     }
+
+    /**
+     * Non-blocking drain of every key currently queued for [readKey].
+     * Each pulled key is shown to [keep]; keys for which `keep`
+     * returns `true` are re-queued in original order (out-of-band
+     * events like [Key.Paste] / [Key.PrintAbove] survive that way),
+     * and the rest are discarded and returned to the caller.
+     *
+     * Used by hosts that own a window where no `readKey` consumer is
+     * active and want to swallow type-ahead — for example the agent's
+     * stream loop drains before and after each LLM stream so a user
+     * who typed during the agent's response doesn't see their input
+     * auto-submit when the next prompt opens.
+     *
+     * Non-suspending: implementations pull from their internal channel
+     * via `tryReceive`. Default no-op for impls without a key queue
+     * (tests, headless invocations).
+     */
+    public fun drainKeys(keep: (Key) -> Boolean = { false }): List<Key> = emptyList()
 }
 
 public data class TerminalSize(

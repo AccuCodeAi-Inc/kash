@@ -7,11 +7,15 @@ import kotlin.test.assertEquals
 import kotlin.test.assertNull
 
 /**
- * Covers [readUtf8LineOrNull] / [readUtf8DelimitedOrNull]. Despite the
- * function name claiming UTF-8, the current implementation converts each
- * byte through `b.toInt().toChar()`, which sign-extends and masks to the
- * low 16 bits — corrupting every byte ≥ 0x80. These tests pin the
- * intended UTF-8 semantics so a future fix can make them pass.
+ * Covers [readUtf8LineOrNull] / [readUtf8DelimitedOrNull]. These pin the
+ * UTF-8 semantics the function names promise: bytes are accumulated and
+ * decoded as UTF-8 at the delimiter, not converted one-at-a-time through
+ * `b.toInt().toChar()` (which sign-extends and corrupts every byte ≥ 0x80).
+ *
+ * Both the suspend [SuspendSource] overload (via [asSuspendSource]) and the
+ * sync [kotlinx.io.RawSource] overload (a [Buffer] is a `RawSource`) are
+ * exercised — the two had independent implementations and the sync one
+ * regressed after the suspend one was fixed.
  */
 class ReadUtf8DelimitedTest {
     private fun bufferOf(vararg bytes: Int): Buffer {
@@ -19,6 +23,34 @@ class ReadUtf8DelimitedTest {
         b.write(bytes.map { it.toByte() }.toByteArray())
         return b
     }
+
+    // ---- sync RawSource overload (Buffer is a RawSource) -------------------
+
+    @Test fun syncAsciiLineRoundTrips() {
+        val src = bufferOf(0x68, 0x69, 0x0A) // "hi\n"
+        assertEquals("hi", src.readUtf8LineOrNull())
+        assertNull(src.readUtf8LineOrNull())
+    }
+
+    @Test fun syncTwoByteUtf8CharSurvives() {
+        // "é\n" — U+00E9 is 0xC3 0xA9. The sign-extending bug turned this into U+FFC3.
+        assertEquals("é", bufferOf(0xC3, 0xA9, 0x0A).readUtf8LineOrNull())
+    }
+
+    @Test fun syncThreeAndFourByteUtf8CharsSurvive() {
+        assertEquals("中", bufferOf(0xE4, 0xB8, 0xAD, 0x0A).readUtf8LineOrNull())
+        assertEquals("😀", bufferOf(0xF0, 0x9F, 0x98, 0x80, 0x0A).readUtf8LineOrNull())
+    }
+
+    @Test fun syncMixedAndTrailingNoNewline() {
+        assertEquals("café", bufferOf(0x63, 0x61, 0x66, 0xC3, 0xA9, 0x0A).readUtf8LineOrNull())
+        // "héllo" with no trailing newline — returned at EOF, then null.
+        val src = bufferOf(0x68, 0xC3, 0xA9, 0x6C, 0x6C, 0x6F)
+        assertEquals("héllo", src.readUtf8LineOrNull())
+        assertNull(src.readUtf8LineOrNull())
+    }
+
+    // ---- suspend SuspendSource overload ------------------------------------
 
     @Test fun asciiLineRoundTrips() =
         runTest {

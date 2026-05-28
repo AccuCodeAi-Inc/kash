@@ -1,14 +1,40 @@
 package com.accucodeai.kash.ui
 
 import androidx.compose.ui.graphics.Color
+import com.accucodeai.kash.api.charWidth
+import com.accucodeai.kash.api.codepointWidth
 
 /**
  * One cell of the terminal grid: a single codepoint plus visual style.
- * Width-1 in v1 — no wide-glyph / CJK handling yet.
+ *
+ * [width] is the East Asian Width of [ch] at write time:
+ *  - `1`: normal single-cell character (default).
+ *  - `2`: a "wide" leader cell — the glyph paints across THIS cell and
+ *    the cell to its right. The right cell is the continuation cell
+ *    described next, and is always the immediate `[r][c+1]` neighbor.
+ *  - `0`: continuation cell of the wide character at `[r][c-1]`. Its
+ *    [ch] is `' '` so iterations that don't know about wide chars
+ *    (e.g. content-detection scans for `ch != ' '`) treat it as
+ *    blank and don't double-print the wide glyph. The renderer and
+ *    selection extractor skip it explicitly via this width tag.
+ *
+ * Writers (cursor `put`, parser shifts, erase/scroll) keep the leader+
+ * continuation pair atomic; readers (paint, selection, copy) skip
+ * `width == 0` cells. See [TerminalGrid.put] for the invariant.
  */
 public data class Cell(
     val ch: Char = ' ',
     val style: CellStyle = CellStyle.Default,
+    val width: Int = 1,
+    /**
+     * Trailing combining marks / ZWJ / variation selectors that
+     * graphically belong to this cell. Empty in the common case;
+     * non-empty whenever the parser saw a width-0 codepoint and
+     * attached it to this cell instead of writing a new cell.
+     * Rendered as `ch + extras` so e.g. `e + U+0301` paints as `é`
+     * in one cell, matching xterm / xterm.js behavior.
+     */
+    val extras: String = "",
 ) {
     public companion object {
         public val Blank: Cell = Cell()
@@ -58,6 +84,15 @@ public class TerminalGrid(
     public var cursorCol: Int = 0
     public var cursorVisible: Boolean = true
     public var currentStyle: CellStyle = CellStyle.Default
+
+    /**
+     * Buffered high surrogate awaiting its low half. The parser feeds [put]
+     * one UTF-16 `Char` at a time, so an astral scalar (emoji, CJK Ext-B)
+     * arrives as two calls; we hold the high surrogate here until the low
+     * one lands so the pair becomes ONE cell instead of two lone-surrogate
+     * cells that both render as tofu. Reset on any non-surrogate write.
+     */
+    private var pendingHigh: Char? = null
 
     private var mainBuf: Array<Array<Cell>> = makeBuffer(rows, cols)
     private var altBuf: Array<Array<Cell>> = makeBuffer(rows, cols)
@@ -190,7 +225,12 @@ public class TerminalGrid(
                     row.size.coerceAtMost(cols)
                 } else {
                     var e = row.size.coerceAtMost(cols)
-                    while (e > 0 && row[e - 1].ch == ' ') e--
+                    // Trim trailing plain spaces only — a continuation
+                    // cell (width = 0) also has ch=' ' but is the
+                    // second half of a wide char and must not be dropped
+                    // without also dropping its leader. Stopping on
+                    // any non-width=1 cell preserves wide pairs.
+                    while (e > 0 && row[e - 1].ch == ' ' && row[e - 1].width == 1) e--
                     e
                 }
             val rowStartOffset = current.cells.size
@@ -227,11 +267,22 @@ public class TerminalGrid(
             }
             var i = 0
             while (i < line.cells.size) {
-                val take = minOf(c, line.cells.size - i)
-                output.add(Array(c) { j -> if (j < take) line.cells[i + j] else Cell.Blank })
-                val isLastChunk = (i + take) >= line.cells.size
+                var take = minOf(c, line.cells.size - i)
+                // Don't split a wide pair across the row boundary: if
+                // the last cell of this chunk is a leader (width=2),
+                // its continuation would land on the next row. Back
+                // off by one so the leader rolls forward instead. The
+                // trailing cell of THIS row is then blank padding.
+                if (take > 0 && take < line.cells.size - i &&
+                    line.cells[i + take - 1].width == 2
+                ) {
+                    take--
+                }
+                val chunkTake = take
+                output.add(Array(c) { j -> if (j < chunkTake) line.cells[i + j] else Cell.Blank })
+                val isLastChunk = (i + chunkTake) >= line.cells.size
                 outputWrapped.add(!isLastChunk)
-                i += take
+                i += chunkTake
             }
             if (idx == cursorLogicalIdx) {
                 val off = cursorLogicalOffset.coerceAtLeast(0)
@@ -276,11 +327,99 @@ public class TerminalGrid(
         cursorCol = cursorNewCol.coerceIn(0, c - 1)
     }
 
-    /** Write a printable character at the cursor and advance. Wraps + scrolls. */
+    /**
+     * Write a printable character at the cursor and advance. Wraps +
+     * scrolls. Wide characters (East Asian Width = 2) reserve two
+     * adjacent cells: a leader (width = 2, holds the glyph) followed
+     * by a continuation (width = 0, blank). If only one cell remains
+     * on the current row when we go to write a wide char, we wrap
+     * first so the pair never straddles a row boundary.
+     *
+     * Overwriting half of a previously-written wide pair (e.g. the
+     * cursor lands on a continuation cell after backspace, or we're
+     * about to write the second cell of a future pair) leaves an
+     * orphan on the other side. We blank that orphan to `' '` here
+     * so the row never carries a half-pair into reflow / selection /
+     * paint.
+     */
     public fun put(ch: Char) {
-        if (cursorCol >= cols) {
-            // Auto-wrap: record on the row we're leaving so reflow can
-            // tell this row continues onto the next. Skipped on alt.
+        // Surrogate-pair coalescing. A high surrogate is buffered until its
+        // low half arrives so an astral scalar (emoji, CJK Ext-B) lands in
+        // ONE cell — `ch` holds the high half, `extras` the low half, and
+        // the painter (which always renders `ch + extras`) shapes the whole
+        // scalar. Without this, each surrogate half became its own cell and
+        // folded to a substitute glyph ("😀" → "··").
+        val hi = pendingHigh
+        if (hi != null) {
+            pendingHigh = null
+            if (ch.isLowSurrogate()) {
+                putAstral(hi, ch)
+                return
+            }
+            // Orphan high surrogate (no low half followed) — emit it as its
+            // own cell (it folds to a substitute at paint), then fall through
+            // to handle `ch`.
+            putBmp(hi)
+        }
+        if (ch.isHighSurrogate()) {
+            pendingHigh = ch
+            return
+        }
+        putBmp(ch)
+    }
+
+    /** Write a single BMP `Char` (width 0/1/2) at the cursor. */
+    private fun putBmp(ch: Char) {
+        val w = charWidth(ch)
+        if (w == 0) {
+            // Combining mark / ZWJ / variation selector — graphically
+            // belongs to the cell to our left. Attach it to that
+            // cell's `extras` cluster and don't move the cursor.
+            // Matches xterm / xterm.js: `e + U+0301` renders as `é`
+            // inside a single cell. If we're at column 0 (nothing to
+            // attach to) the mark is dropped — same as xterm.
+            if (cursorCol <= 0) return
+            val line = active()[cursorRow]
+            var target = cursorCol - 1
+            // If the immediate left cell is a continuation (width=0),
+            // the visible glyph is the leader at target-1. Attach
+            // there so the mark composes with the wide char rather
+            // than vanishing inside its continuation slot.
+            if (target in line.indices && line[target].width == 0) target--
+            if (target < 0 || target >= line.size) return
+            val old = line[target]
+            line[target] = old.copy(extras = old.extras + ch)
+            return
+        }
+        placeCell(ch, w, extras = "")
+    }
+
+    /**
+     * Write an astral scalar (emoji / CJK Ext-B), given its surrogate halves.
+     * Width comes from [codepointWidth] on the full codepoint (emoji = 2).
+     * The high half goes in `ch` and the low half in `extras` so the
+     * painter's `ch + extras` render path shapes the scalar intact; any
+     * trailing VS16 / combining mark then appends to `extras` via [putBmp]'s
+     * width-0 path.
+     */
+    private fun putAstral(
+        hi: Char,
+        lo: Char,
+    ) {
+        val cp = 0x10000 + ((hi.code - 0xD800) shl 10) + (lo.code - 0xDC00)
+        placeCell(hi, codepointWidth(cp), extras = lo.toString())
+    }
+
+    /** Place a width-[w] cell ([ch] + [extras]) at the cursor, wrapping and
+     *  clearing dangling wide-pair halves as needed, then advance by [w]. */
+    private fun placeCell(
+        ch: Char,
+        w: Int,
+        extras: String,
+    ) {
+        // Need [w] cells on the current row. If short, wrap first so
+        // wide chars never straddle the right edge.
+        if (cursorCol + w > cols) {
             if (!onAlt && cursorRow in mainBufWrapped.indices) {
                 mainBufWrapped[cursorRow] = true
             }
@@ -291,8 +430,38 @@ public class TerminalGrid(
                 cursorRow = rows - 1
             }
         }
-        active()[cursorRow][cursorCol] = Cell(ch, currentStyle)
-        cursorCol++
+        val line = active()[cursorRow]
+        // Pre-clean: about to overwrite the continuation half of an
+        // existing wide pair to our left, or the leader half of one
+        // about to start at our right edge. Either way, the dangling
+        // half becomes a literal space.
+        clearOrphanAt(line, cursorCol)
+        if (w == 2) clearOrphanAt(line, cursorCol + 1)
+        line[cursorCol] = Cell(ch, currentStyle, width = w, extras = extras)
+        if (w == 2) {
+            line[cursorCol + 1] = Cell(' ', currentStyle, width = 0)
+        }
+        cursorCol += w
+    }
+
+    /**
+     * If `line[col]` is a continuation cell, the leader it belongs to
+     * is at `col - 1`; blank that leader so it isn't left pointing at
+     * a now-overwritten continuation. If `line[col]` is a leader, its
+     * continuation at `col + 1` becomes a stranded `width == 0` cell;
+     * blank that continuation. No-op for plain width-1 cells, which
+     * are the common case.
+     */
+    private fun clearOrphanAt(
+        line: Array<Cell>,
+        col: Int,
+    ) {
+        if (col < 0 || col >= line.size) return
+        val here = line[col]
+        when (here.width) {
+            0 -> if (col - 1 >= 0) line[col - 1] = Cell(' ', here.style)
+            2 -> if (col + 1 < line.size) line[col + 1] = Cell(' ', here.style)
+        }
     }
 
     /** CR — move to column 0. */
@@ -326,6 +495,13 @@ public class TerminalGrid(
     ) {
         cursorRow = row.coerceIn(0, rows - 1)
         cursorCol = col.coerceIn(0, cols - 1)
+        // Do not snap to wide-char leaders here. xterm / xterm.js
+        // leave the cursor wherever the app put it, even on a
+        // continuation cell — apps that emit per-column moves
+        // (`CSI 1 C` after a wide write, etc.) depend on it. The
+        // visual cursor and selection layers handle the continuation-
+        // cell case at paint time; subsequent writes that land on a
+        // half-pair are healed by `clearOrphanAt` in [put].
     }
 
     public fun moveBy(
@@ -345,9 +521,27 @@ public class TerminalGrid(
         val line = active()[cursorRow]
         val blank = Cell(' ', currentStyle.copy(inverse = false))
         when (mode) {
-            1 -> for (i in 0..cursorCol.coerceAtMost(cols - 1)) line[i] = blank
-            2 -> for (i in 0 until cols) line[i] = blank
-            else -> for (i in cursorCol until cols) line[i] = blank
+            1 -> {
+                val until = (cursorCol + 1).coerceAtMost(cols)
+                for (i in 0 until until) line[i] = blank
+                // Right boundary: if line[until] was a continuation of a
+                // now-erased leader, it's an orphan — clear it.
+                if (until < line.size && line[until].width == 0) line[until] = blank
+            }
+
+            2 -> {
+                for (i in 0 until cols) line[i] = blank
+            }
+
+            else -> {
+                val from = cursorCol.coerceIn(0, cols)
+                // Left boundary: if line[from-1] was a leader whose
+                // continuation we just erased, it's an orphan.
+                if (from - 1 in line.indices && line[from - 1].width == 2) {
+                    line[from - 1] = blank
+                }
+                for (i in from until cols) line[i] = blank
+            }
         }
     }
 
@@ -368,7 +562,9 @@ public class TerminalGrid(
             1 -> {
                 for (r in 0 until cursorRow) for (c in 0 until cols) buf[r][c] = blank
                 val line = buf[cursorRow]
-                for (c in 0..cursorCol.coerceAtMost(cols - 1)) line[c] = blank
+                val until = (cursorCol + 1).coerceAtMost(cols)
+                for (c in 0 until until) line[c] = blank
+                if (until < line.size && line[until].width == 0) line[until] = blank
             }
 
             2, 3 -> {
@@ -409,7 +605,11 @@ public class TerminalGrid(
 
             else -> {
                 val line = buf[cursorRow]
-                for (c in cursorCol until cols) line[c] = blank
+                val from = cursorCol.coerceIn(0, cols)
+                if (from - 1 in line.indices && line[from - 1].width == 2) {
+                    line[from - 1] = blank
+                }
+                for (c in from until cols) line[c] = blank
                 for (r in (cursorRow + 1) until rows) for (c in 0 until cols) buf[r][c] = blank
             }
         }

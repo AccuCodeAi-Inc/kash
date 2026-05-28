@@ -13,60 +13,47 @@ import com.accucodeai.kash.tools.python3.PythonEngine
 import com.accucodeai.kash.tools.python3.PythonSource
 import com.accucodeai.kash.tools.python3.pyodide.worker.PyodideErrorPolicy
 import com.accucodeai.kash.tools.python3.pyodide.worker.PyodideWorkerClient
-import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.GlobalScope
 import kotlinx.coroutines.TimeoutCancellationException
-import kotlinx.coroutines.await
-import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeout
+import kotlinx.io.readByteArray
 import kotlin.time.Duration.Companion.milliseconds
 
 /**
  * Pyodide-backed [PythonEngine] for the wasmJs target.
  *
+ * **Worker-only.** Pyodide runs in a dedicated Web Worker via
+ * [PyodideWorkerClient]; the kash main thread never blocks. Filesystem
+ * access is a live request-response bridge (see [worker.SabFsServer] +
+ * the Emscripten FS plugin in `pyodide-worker.js`) backed by
+ * SharedArrayBuffer + `Atomics.wait`, which requires cross-origin
+ * isolation (COOP `same-origin` + COEP `require-corp`). Pages without
+ * isolation can't run kash's Python at all — we surface a clear error
+ * rather than silently degrading.
+ *
+ * The previous "in-process Pyodide on the main thread with a snapshot FS"
+ * fallback was deleted: it couldn't serve `input()` (no async stdin) and
+ * its snapshot FS prevented round-trip writes between Python and the kash
+ * shell. The worker path is now the only path.
+ *
  * Architectural mirror of `GraalPyEngine` from `:tools:kash:python3-graalpy`:
  *  - argv parsing lives in `Python3Command` and is reused unchanged
  *  - stdin / stdout / stderr are kash's `SuspendSource` / `SuspendSink`
- *  - filesystem access is routed through a [KashEmscriptenFs] mount so
- *    `open()` inside Python lands in kash's [FileSystem]
- *  - timeout enforced via coroutine `withTimeout`; on expiry we drop the
- *    cached runtime so the next invocation starts fresh (Pyodide has no
- *    hard interrupt that races synchronous Python without setInterruptBuffer
- *    polling — left as a future improvement)
+ *  - filesystem access lands in kash's [FileSystem] via the live bridge
+ *  - timeout enforced via coroutine `withTimeout`; on expiry the worker
+ *    is terminated so the next invocation starts fresh
  *
- * Differences from GraalPy:
- *  - The Pyodide runtime is shared across invocations (loading it costs
- *    ~10 MB / a few seconds; we won't pay that per `python3` call). User
- *    code still runs in a fresh `globals()` per invocation because
- *    `runPythonAsync` evaluates each program in its own scope when the
- *    script body doesn't bind module-level names back to `pyodide.globals`.
- *  - There is no sandbox knob — the wasm + browser tab is the sandbox.
- *    `SandboxPolicy.SAFE` short-circuits the same way (return 126).
+ * Both [execute] and [runInteractiveRepl] go through the same worker. The
+ * REPL uses [PyodideWorkerClient]'s session API ([PyodideWorkerClient.beginSession]
+ * / [PyodideWorkerClient.runInSession]): one Pyodide instance, one FS
+ * bridge, many push calls. Python globals persist across pushes because
+ * the worker's `runPythonAsync` evaluates each push in the same Pyodide
+ * scope.
  */
 public class PyodideEngine : PythonEngine {
     override val name: String = "Pyodide"
 
     /**
-     * Cached Pyodide handle, populated on first `execute` and reused.
-     */
-    private var cached: PyodideAPI? = null
-
-    /**
-     * Tracks the currently-mounted KashEmscriptenFs handle (if any). Pyodide's
-     * FS only supports one mount per path, so we mount kash at [MOUNT_POINT]
-     * lazily on first use and re-bind the underlying [FileSystem] per
-     * invocation by mutating the handle's `fs` property — cheaper than
-     * unmount + remount.
-     */
-    private var fsBridge: KashEmscriptenFs? = null
-
-    /**
-     * Worker-backed backend, lazily created when the hosting page is
-     * cross-origin-isolated (COOP/COEP set). When non-null, [execute] routes
-     * through this so the worker's `Atomics.wait`-based stdin can serve
-     * `input()`. When null, falls back to the in-process path which has the
-     * known always-EOF stdin limitation documented at [bindStreams].
+     * Worker-backed backend, created lazily on first [execute].
      */
     private var workerClient: PyodideWorkerClient? = null
 
@@ -117,6 +104,18 @@ public class PyodideEngine : PythonEngine {
             return 126
         }
 
+        if (!workerSupported) {
+            stderr.writeBytes(
+                (
+                    "python3: requires a cross-origin-isolated page " +
+                        "(COOP `same-origin` + COEP `require-corp`). Serve the app with " +
+                        "those headers so SharedArrayBuffer is available — Pyodide's stdin " +
+                        "and the kash filesystem bridge both need it.\n"
+                ).encodeToByteArray(),
+            )
+            return 126
+        }
+
         val program: String =
             when (source) {
                 is PythonSource.Code -> {
@@ -153,46 +152,17 @@ public class PyodideEngine : PythonEngine {
         val prelude = buildSysArgvPrelude(sysArgvScript, scriptArgs)
         val full = prelude + "\n" + program
 
-        // Worker path: real stdin via SAB+Atomics. Required for any script
-        // that calls input() / reads sys.stdin. Selected when the hosting
-        // page is cross-origin-isolated.
-        if (workerSupported) {
-            val client = workerClient ?: PyodideWorkerClient().also { workerClient = it }
-            return try {
-                withTimeout(timeoutMillis.milliseconds) {
-                    client.execute(full, fs, cwd, stdin, stdout, stderr)
-                }
-            } catch (_: TimeoutCancellationException) {
-                // Worker may be wedged in a CPU loop — terminate so the
-                // next invocation gets a clean instance. Pyodide load is
-                // ~3s but correctness > latency on the rare timeout path.
-                client.shutdown()
-                workerClient = null
-                stderr.writeBytes("python3: execution timed out after ${timeoutMillis}ms\n".encodeToByteArray())
-                124
-            } catch (e: Throwable) {
-                PyodideErrorPolicy.stderrTextForError(e.message)?.let {
-                    stderr.writeBytes(it.encodeToByteArray())
-                }
-                PyodideErrorPolicy.extractSystemExitCode(e.message) ?: 1
-            }
-        }
-
-        // In-process fallback: page lacks COOP/COEP or browser doesn't
-        // support SharedArrayBuffer. Stdin is always-EOF — interactive
-        // scripts will hit EOFError. Functional for non-interactive use.
-        val pyodide = ensureLoaded()
-        bindFileSystem(pyodide, fs, cwd)
-        bindStreams(pyodide, stdin, stdout, stderr)
-
+        val client = workerClient ?: PyodideWorkerClient().also { workerClient = it }
         return try {
             withTimeout(timeoutMillis.milliseconds) {
-                pyodide.runPythonAsync(full.toJsString()).await<JsAny?>()
+                client.execute(full, fs, cwd, stdin, stdout, stderr)
             }
-            0
         } catch (_: TimeoutCancellationException) {
-            cached = null
-            fsBridge = null
+            // Worker may be wedged in a CPU loop — terminate so the
+            // next invocation gets a clean instance. Pyodide load is
+            // ~3s but correctness > latency on the rare timeout path.
+            client.shutdown()
+            workerClient = null
             stderr.writeBytes("python3: execution timed out after ${timeoutMillis}ms\n".encodeToByteArray())
             124
         } catch (e: Throwable) {
@@ -205,56 +175,11 @@ public class PyodideEngine : PythonEngine {
 
     /**
      * Release any held resources. The worker (if any) is terminated; the
-     * in-process Pyodide instance is GC'd with the engine. Idempotent.
+     * in-process REPL Pyodide instance is GC'd with the engine. Idempotent.
      */
     public fun shutdown() {
         workerClient?.shutdown()
         workerClient = null
-        cached = null
-        fsBridge = null
-    }
-
-    private suspend fun ensureLoaded(): PyodideAPI {
-        cached?.let { return it }
-        // Use the relative `./pyodide/` path the gradle bundle task populates.
-        // The path is served by the same web server as our js bundle so it
-        // works offline and avoids CDN cross-origin trickery.
-        val api = loadPyodideWithIndexUrl("./pyodide/").await<PyodideAPI>()
-        cached = api
-        return api
-    }
-
-    private suspend fun bindFileSystem(
-        api: PyodideAPI,
-        fs: FileSystem,
-        cwd: String,
-    ) {
-        val bridge = fsBridge ?: KashEmscriptenFs.mount(api, fs, cwd).also { fsBridge = it }
-        bridge.rebind(fs, cwd)
-        // chdir into the kash mount so relative paths in Python land where
-        // the shell expects.
-        api.FS.chdir((MOUNT_POINT + Paths.resolve("/", cwd)).toJsString())
-    }
-
-    private fun bindStreams(
-        api: PyodideAPI,
-        @Suppress("UNUSED_PARAMETER") stdin: SuspendSource,
-        stdout: SuspendSink,
-        stderr: SuspendSink,
-    ) {
-        // V1 stdin: always EOF. Pyodide's stdin callback is synchronous and
-        // can't suspend on a kash SuspendSource. Phase 3 will add an event-
-        // driven feed via SharedArrayBuffer for the interactive REPL.
-        api.setStdin(makeEofStdinOptions())
-
-        val stdoutHandler: (JsString) -> Unit = { line ->
-            launchAndForget { stdout.writeBytes((line.toString() + "\n").encodeToByteArray()) }
-        }
-        val stderrHandler: (JsString) -> Unit = { line ->
-            launchAndForget { stderr.writeBytes((line.toString() + "\n").encodeToByteArray()) }
-        }
-        api.setStdout(makeBatchedSinkOptions(stdoutHandler))
-        api.setStderr(makeBatchedSinkOptions(stderrHandler))
     }
 
     private fun buildSysArgvPrelude(
@@ -270,18 +195,21 @@ public class PyodideEngine : PythonEngine {
     /**
      * Drive an interactive Python REPL backed by `pyodide.console.PyodideConsole`.
      *
+     * Runs on the worker via [PyodideWorkerClient]'s session API — same
+     * Pyodide instance, same live kash FS bridge, same `input()` capability
+     * as `python3 -c …`. Each REPL line becomes one [PyodideWorkerClient.runInSession]
+     * call; Python globals (including `_kash_console`) persist across
+     * pushes because the Pyodide runtime in the worker stays alive for the
+     * session.
+     *
      * We can't reuse CPython's `code.interact()` directly (that's a
      * blocking loop calling `sys.stdin.readline()`, and our stdin is a
      * suspending kash channel). Instead we run the readline loop in
-     * Kotlin: write the prompt, read bytes from [stdin] until `\n`,
-     * push the line to a `PyodideConsole` instance, inspect the
-     * returned status (`complete` / `incomplete` / `syntax-error`) to
-     * choose the next prompt. PyodideConsole takes care of:
-     *   - statement-boundary detection (so multi-line `def`/`class`/
-     *     `if` blocks work)
-     *   - printing `repr(value)` for bare expressions
-     *   - routing print/exception output through the stdout/stderr
-     *     handlers we wired in [bindStreams]
+     * Kotlin: write the prompt, read bytes from [stdin] until `\n`, push
+     * the line to `_kash_console`, inspect the returned
+     * `(syntax_check, exit_code)` tuple to choose the next prompt or
+     * exit. Stdin is fed to the SAB ring only during each run, so the
+     * Kotlin-side prompt loop and Python's `input()` don't fight over it.
      */
     override suspend fun runInteractiveRepl(
         fs: FileSystem,
@@ -291,152 +219,134 @@ public class PyodideEngine : PythonEngine {
         stdout: SuspendSink,
         stderr: SuspendSink,
     ): Int {
-        val pyodide =
-            try {
-                ensureLoaded()
-            } catch (e: Throwable) {
-                stderr.writeBytes(("python3: failed to load Pyodide: ${e.message}\n").encodeToByteArray())
+        if (!workerSupported) {
+            stderr.writeBytes(
+                (
+                    "python3: REPL requires a cross-origin-isolated page " +
+                        "(COOP `same-origin` + COEP `require-corp`).\n"
+                ).encodeToByteArray(),
+            )
+            return 126
+        }
+        val client = workerClient ?: PyodideWorkerClient().also { workerClient = it }
+
+        client.beginSession(fs, cwd, stdin, stdout, stderr)
+        try {
+            // PyodideConsole.runcode catches SystemExit internally and dumps
+            // the traceback to stderr instead of letting it bubble up — so
+            // `exit()` at the prompt would otherwise print a noisy asyncio
+            // traceback and the REPL would keep running. Monkey-patch
+            // sys.exit / builtins.exit / builtins.quit to record the
+            // requested code in a module-level slot we poll after each push.
+            val initSource =
+                "from pyodide.console import PyodideConsole\n" +
+                    "_kash_console = PyodideConsole()\n" +
+                    EXIT_PATCH
+            val initResult =
+                try {
+                    client.runInSession(initSource)
+                } catch (e: Throwable) {
+                    stderr.writeBytes(("python3: REPL init failed: ${e.message}\n").encodeToByteArray())
+                    return 1
+                }
+            if (initResult.errorMessage != null) {
+                stderr.writeBytes(
+                    ("python3: REPL init failed: ${initResult.errorMessage}\n").encodeToByteArray(),
+                )
                 return 1
             }
-        bindFileSystem(pyodide, fs, cwd)
-        bindStreams(pyodide, stdin, stdout, stderr)
 
-        // Fresh console per REPL session. Using runPythonAsync (not
-        // runPython) wraps the import + construction in Pyodide's
-        // top-level-await trampoline, which surfaces JS-side throws as
-        // Kotlin/Wasm Throwables we can catch normally.
-        try {
-            pyodide
-                .runPythonAsync(
-                    "from pyodide.console import PyodideConsole".toJsString(),
-                ).await<JsAny?>()
-            pyodide
-                .runPythonAsync(
-                    "_kash_console = PyodideConsole()".toJsString(),
-                ).await<JsAny?>()
-            // PyodideConsole.runcode catches SystemExit internally and
-            // dumps the traceback to stderr instead of letting it
-            // bubble up — so `exit()` at the prompt prints a noisy
-            // asyncio traceback and the REPL keeps running. Monkey-
-            // patch sys.exit / builtins.exit / builtins.quit to record
-            // the requested code in a module-level slot we can poll
-            // after each push, so we exit cleanly with the right code.
-            pyodide
-                .runPythonAsync(EXIT_PATCH.toJsString())
-                .await<JsAny?>()
-        } catch (e: Throwable) {
-            stderr.writeBytes(("python3: REPL init failed: ${e.message}\n").encodeToByteArray())
-            return 1
-        }
-
-        val banner = "Python on Pyodide — type exit() or Ctrl-D to quit\n"
-        stdout.writeBytes(banner.encodeToByteArray())
-        stdout.flush()
-
-        var prompt = ">>> "
-        while (true) {
-            stdout.writeBytes(prompt.encodeToByteArray())
+            val banner = "Python on Pyodide — type exit() or Ctrl-D to quit\n"
+            stdout.writeBytes(banner.encodeToByteArray())
             stdout.flush()
 
-            val line =
-                readOneLine(stdin) ?: run {
-                    stdout.writeBytes("\n".encodeToByteArray())
+            var prompt = ">>> "
+            while (true) {
+                stdout.writeBytes(prompt.encodeToByteArray())
+                stdout.flush()
+
+                val line =
+                    readOneLine(stdin) ?: run {
+                        stdout.writeBytes("\n".encodeToByteArray())
+                        return 0
+                    }
+
+                val trimmed = line.trim()
+                if (trimmed == "exit" || trimmed == "quit" ||
+                    trimmed == "exit()" || trimmed == "quit()"
+                ) {
                     return 0
                 }
 
-            // Fast-path bare `exit` / `quit` / `exit()` / `quit()`.
-            // CPython's `exit` is a sitebuiltins.Quitter that calls
-            // sys.exit() with no useful repr if you forget the `()`.
-            // We match that UX: any of these forms exits cleanly with
-            // code 0, no traceback.
-            val trimmed = line.trim()
-            if (trimmed == "exit" || trimmed == "quit" ||
-                trimmed == "exit()" || trimmed == "quit()"
-            ) {
-                return 0
-            }
+                // Per push: feed line to PyodideConsole, await its
+                // ConsoleFuture, return (syntax_check, _kash_repl_exit_code)
+                // as the script's final expression so we read the tuple off
+                // [SessionRunResult.resultRepr].
+                val pushCode = (
+                    "_kash_repl_fut = _kash_console.push(" + quote(line) + ")\n" +
+                        "await _kash_repl_fut\n" +
+                        "(_kash_repl_fut.syntax_check, _kash_repl_exit_code)"
+                )
 
-            // PyodideConsole.push returns a `ConsoleFuture` (extends
-            // asyncio.Future). The `syntax_check` attribute on the
-            // future itself tells us whether the source was complete /
-            // incomplete / a syntax error — the *awaited result* is
-            // whatever the executed code produced (usually None for a
-            // statement like `print(...)`), which is not what we want.
-            // We await the future to let `runcode` finish (and to drive
-            // top-level `await` inside user code), then read
-            // `.syntax_check` off the future itself.
-            //
-            // Final expression reads the exit-slot we installed in
-            // EXIT_PATCH; if non-None, the line called sys.exit(N).
-            // We return that as a tuple along with syntax_check.
-            val pushCode = (
-                "_kash_repl_fut = _kash_console.push(" + quote(line) + ")\n" +
-                    "await _kash_repl_fut\n" +
-                    "(_kash_repl_fut.syntax_check, _kash_repl_exit_code)"
-            )
-
-            val rawText =
-                try {
-                    val raw = pyodide.runPythonAsync(pushCode.toJsString()).await<JsAny?>()
-                    raw?.toString() ?: ""
-                } catch (e: Throwable) {
-                    // Belt and suspenders: in case Pyodide ever does
-                    // bubble SystemExit (older versions did), still
-                    // catch and parse it.
-                    val msg = e.message ?: ""
-                    if (msg.contains("SystemExit")) {
-                        val code = extractSystemExitCode(msg) ?: 0
-                        return code
+                val result =
+                    try {
+                        client.runInSession(pushCode)
+                    } catch (e: Throwable) {
+                        stderr.writeBytes(("python3: REPL error: ${e.message}\n").encodeToByteArray())
+                        continue
                     }
-                    stderr.writeBytes(("python3: REPL error: $msg\n").encodeToByteArray())
-                    ""
+
+                // SystemExit caught at the worker (not via the slot path).
+                if (result.errorMessage != null) {
+                    val sysExit = extractSystemExitCode(result.errorMessage)
+                    if (sysExit != null) return sysExit
+                    // Real error already piped to stderr by the worker's
+                    // stderrTextForError path; just keep looping.
                 }
 
-            // Parse the tuple Python produced. Two cases:
-            //  - "('complete', None)" / "('incomplete', None)" — keep
-            //    looping with the right prompt
-            //  - "('complete', 0)" — sys.exit(N) was called; exit kash
-            //    cleanly with that code
-            val (status, exitCode) = parseStatusTuple(rawText)
-            if (exitCode != null) {
-                // Reset the slot in case the REPL is re-entered later
-                // in the same Pyodide instance (we don't today, but
-                // hygiene).
-                try {
-                    pyodide.runPythonAsync("_kash_repl_exit_code = None".toJsString()).await<JsAny?>()
-                } catch (_: Throwable) {
+                val (status, exitCode) = parseStatusTuple(result.resultRepr)
+                if (exitCode != null) {
+                    // Reset the slot so a future session can re-enter cleanly.
+                    try {
+                        client.runInSession("_kash_repl_exit_code = None")
+                    } catch (_: Throwable) {
+                    }
+                    return exitCode
                 }
-                return exitCode
+
+                prompt = if (status == "incomplete") "... " else ">>> "
             }
-
-            prompt = if (status == "incomplete") "... " else ">>> "
+        } finally {
+            client.endSession()
         }
     }
 
     /**
      * Read one line from [stdin] (bytes up to `\n` exclusive). Returns
-     * null on EOF before any bytes arrive. The cooked-mode line
-     * discipline in [com.accucodeai.kash.ui.ComposeTerminal] guarantees
-     * bytes arrive in line-sized chunks already, so this is mostly a
-     * pass-through.
+     * null on EOF before any bytes arrive.
+     *
+     * Bytes are accumulated raw and decoded as UTF-8 once, at the line
+     * boundary — NOT per byte. Decoding each byte as a char (`b.toChar()`)
+     * would Latin-1-mangle any multibyte input: `é` (0xC3 0xA9) becomes two
+     * chars, every CJK char becomes three, and the REPL pushes mojibake into
+     * Python. kash is UTF-8 internally and CJK REPL input is a supported case.
      */
     private suspend fun readOneLine(stdin: SuspendSource): String? {
-        val sb = StringBuilder()
+        val line = kotlinx.io.Buffer()
         val tmp = kotlinx.io.Buffer()
+        var sawAny = false
         while (true) {
             val n = stdin.readAtMostTo(tmp, 1)
-            if (n < 0L) return if (sb.isEmpty()) null else sb.toString()
+            if (n < 0L) return if (!sawAny) null else line.readByteArray().decodeToString()
             if (n == 0L) continue
-            val b = tmp.readByte().toInt() and 0xFF
-            if (b == 0x0A) return sb.toString() // LF
-            sb.append(b.toChar())
+            sawAny = true
+            val b = tmp.readByte()
+            if (b.toInt() == 0x0A) return line.readByteArray().decodeToString() // LF
+            line.writeByte(b)
         }
     }
 
     public companion object {
-        /** Virtual mount point under which kash's [FileSystem] appears inside Pyodide. */
-        public const val MOUNT_POINT: String = "/kash"
-
         /** Quote a string for inclusion in a Python source literal. */
         internal fun quote(s: String): String =
             "\"" +
@@ -450,19 +360,19 @@ public class PyodideEngine : PythonEngine {
          * Parse the integer so an explicit `sys.exit(N)` is reflected in the
          * kash exit code instead of being lumped into the generic-uncaught
          * exit `1`. Delegates to [PyodideErrorPolicy] so the worker path and
-         * the in-process path agree on the rule.
+         * the REPL path agree on the rule.
          */
         internal fun extractSystemExitCode(msg: String?): Int? = PyodideErrorPolicy.extractSystemExitCode(msg)
 
         /**
          * Python source executed once at REPL boot. Overrides
-         * `sys.exit`, `builtins.exit`, and `builtins.quit` so that
-         * calling any of them sets a module-level `_kash_repl_exit_code`
-         * to the requested exit code, and still raises `SystemExit`
-         * (matching CPython behavior). PyodideConsole.runcode catches
-         * the SystemExit and prints a traceback — but our post-push
-         * polling reads `_kash_repl_exit_code` to detect it and shut
-         * the REPL down cleanly instead.
+         * `sys.exit`, `builtins.exit`, and `builtins.quit` so calling
+         * any of them sets a module-level `_kash_repl_exit_code` to the
+         * requested exit code, and still raises `SystemExit` (matching
+         * CPython behavior). PyodideConsole.runcode catches the
+         * SystemExit and prints a traceback; our post-push polling
+         * reads `_kash_repl_exit_code` to detect it and shut down
+         * cleanly instead.
          */
         internal val EXIT_PATCH: String =
             """
@@ -479,8 +389,7 @@ public class PyodideEngine : PythonEngine {
 
         /**
          * Parse the tuple repr Python writes for `(syntax_check, exit_code)`.
-         * Cheap regex-free split — Python prints tuples deterministically
-         * as `('complete', None)` etc. Returns (statusStr, exitCodeOrNull).
+         * Returns (statusStr, exitCodeOrNull).
          */
         internal fun parseStatusTuple(raw: String): Pair<String, Int?> {
             val s = raw.trim().removePrefix("(").removeSuffix(")")
@@ -494,33 +403,3 @@ public class PyodideEngine : PythonEngine {
         }
     }
 }
-
-/**
- * Construct `{ batched: handler, isatty: false }` from JS, capturing
- * [handler] by closure. Defined out-of-line because Kotlin/Wasm's `js("...")`
- * captures locals by name and we want a single named lambda parameter.
- */
-private fun makeBatchedSinkOptions(handler: (JsString) -> Unit): JsAny =
-    js("({ batched: function (s) { handler(s); }, isatty: false })")
-
-/** Build `{ stdin: () => null, isatty: false }` — always-EOF stdin handler. */
-private fun makeEofStdinOptions(): JsAny = js("({ stdin: function () { return null; }, isatty: false })")
-
-/**
- * Fire-and-forget helper for Pyodide's *synchronous* JS callbacks. The
- * callback can't suspend on a kash SuspendSink, so we launch the write on a
- * global scope. Order is preserved per-sink because each call appends to the
- * same underlying Buffer sequentially via the same dispatcher.
- *
- * GlobalScope is acceptable here: the work is bounded (one write per
- * callback), has no parent to cancel, and the wasmJs runtime is
- * single-threaded so we can't introduce real concurrency.
- */
-@OptIn(kotlinx.coroutines.DelicateCoroutinesApi::class)
-private fun launchAndForget(block: suspend () -> Unit) {
-    @Suppress("OPT_IN_USAGE")
-    GlobalScope.launch(Dispatchers.Default) { block() }
-}
-
-@Suppress("UNUSED")
-private fun CoroutineScope.unused() {} // satisfy unused-import lint if any

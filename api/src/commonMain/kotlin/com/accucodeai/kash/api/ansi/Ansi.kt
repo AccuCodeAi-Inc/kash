@@ -82,6 +82,47 @@ public object Ansi {
     public enum class Stream { STDOUT, STDERR }
 
     /**
+     * Control-Sequence Introducer (`\u001B[`) — the universal prefix
+     * for VT100/xterm CSI escapes. Use this and the helpers below
+     * instead of writing raw `\u001B[` strings inline; both keeps
+     * source readable and (more importantly) keeps the sequences
+     * from getting silently stripped by editor copy-paste that drops
+     * raw ESC bytes.
+     */
+    public const val CSI: String = "\u001B["
+
+    /** ASCII BEL (0x07) — the "ambiguous completion" / "no match" beep. */
+    public const val BEL: String = "\u0007"
+
+    /** CSI J — erase from cursor to end of display. */
+    public const val ERASE_TO_END_OF_DISPLAY: String = "\u001B[J"
+
+    /** CSI K — erase from cursor to end of current line. */
+    public const val ERASE_TO_END_OF_LINE: String = "\u001B[K"
+
+    /** CSI 2K — erase the entire current line, cursor stays put. */
+    public const val ERASE_LINE: String = "\u001B[2K"
+
+    /** CSI 2J CSI H — clear the whole screen and home the cursor. */
+    public const val CLEAR_SCREEN_AND_HOME: String = "\u001B[2J\u001B[H"
+
+    /** CSI ?25h / CSI ?25l — show / hide the cursor (DECTCEM). */
+    public const val SHOW_CURSOR: String = "\u001B[?25h"
+    public const val HIDE_CURSOR: String = "\u001B[?25l"
+
+    /** CSI n A — move the cursor up [n] rows. No-op when `n <= 0`. */
+    public fun cursorUp(n: Int): String = if (n <= 0) "" else "\u001B[${n}A"
+
+    /** CSI n B — move the cursor down [n] rows. */
+    public fun cursorDown(n: Int): String = if (n <= 0) "" else "\u001B[${n}B"
+
+    /** CSI n C — move the cursor [n] columns to the right. */
+    public fun cursorForward(n: Int): String = if (n <= 0) "" else "\u001B[${n}C"
+
+    /** CSI n D — move the cursor [n] columns to the left. */
+    public fun cursorBack(n: Int): String = if (n <= 0) "" else "\u001B[${n}D"
+
+    /**
      * Build a styler for [ctx]. Decision order (highest precedence first):
      *  1. explicit [mode] (`--color=always|never`)
      *  2. `NO_COLOR` env set to anything non-empty → off

@@ -61,8 +61,25 @@ import org.graalvm.polyglot.SandboxPolicy as GraalSandboxPolicy
  * Threading: each invocation gets its own `Context`. We do NOT reuse a
  * pre-warmed Context — that would allow program N+1 to observe N's globals.
  * Construction is cheap relative to the rest of an interpreter startup.
+ *
+ * Unclosed-write flush ([flushUnclosedWrites], default on): CPython refcounts
+ * an orphaned file object to zero at end of statement and runs its finalizer
+ * (`close()` → flush), so `open(p,'w').write(x)` lands without an explicit
+ * close. GraalPy uses Java's tracing GC with no `IOBase.__del__`; its only
+ * file finalizer (`PFileIO.OwnFD`) closes the raw fd *without* flushing the
+ * Python-level `BufferedWriter`, and `finalizeContext()` flushes only
+ * stdout/stderr — so the bytes are stranded in two close-only buffers (the
+ * Python writer and kash's `InMemoryChannel`) and never reach the FS. This is
+ * the documented non-refcounting gotcha shared by PyPy/Jython/GraalPy, which
+ * upstream punts to "fix your program." We instead install a small shim (see
+ * [FLUSH_UNCLOSED_SHIM]) that tracks writable files opened via `open`/`io.open`
+ * and closes any survivors from an `atexit` hook, which GraalPy runs inside
+ * `finalizeContext` before teardown. Set to `false` to get raw GraalPy
+ * semantics (the truthful behavior for portability testing). See docs/QUIRKS.md.
  */
-public class GraalPyEngine : PythonEngine {
+public class GraalPyEngine(
+    private val flushUnclosedWrites: Boolean = true,
+) : PythonEngine {
     override val name: String = "GraalPy"
 
     override suspend fun execute(
@@ -214,17 +231,19 @@ public class GraalPyEngine : PythonEngine {
                     throw e
                 }
 
+            // A graceful close lets GraalPy run finalizeContext →
+            // runShutdownHooks → atexit, which is where the unclosed-write
+            // flush shim does its work. close(cancelIfExecuting=true) marks the
+            // context as *cancelling*, and GraalPy skips runShutdownHooks when
+            // cancelling — so the forceful close is reserved for the timeout
+            // path, where interrupting a still-running eval is the whole point.
+            var cancel = false
             try {
                 withTimeout(timeoutMillis.milliseconds) {
                     runProgram(ctx, program, sysArgvScript, scriptArgs)
                 }
             } catch (e: TimeoutCancellationException) {
-                // close(cancelIfExecuting=true) interrupts the eval thread.
-                try {
-                    ctx.close(true)
-                } catch (_: Throwable) {
-                    // ignore — context is going away anyway
-                }
+                cancel = true
                 errAdapter.write("python3: execution timed out after ${timeoutMillis}ms\n".toByteArray())
                 124
             } catch (e: PolyglotException) {
@@ -236,9 +255,15 @@ public class GraalPyEngine : PythonEngine {
                 1
             } finally {
                 try {
-                    ctx.close(true)
+                    ctx.close(cancel)
                 } catch (_: Throwable) {
-                    // ignore — multiple close() calls are allowed but throw is harmless
+                    // Graceful close can fail if something is still pending;
+                    // fall back to a forceful close so the context is released.
+                    try {
+                        ctx.close(true)
+                    } catch (_: Throwable) {
+                        // ignore — context is going away anyway
+                    }
                 }
             }
         }
@@ -393,6 +418,16 @@ public class GraalPyEngine : PythonEngine {
         sysArgvScript: String,
         scriptArgs: List<String>,
     ): Int {
+        // Install the unclosed-write flush shim in its own eval so it doesn't
+        // shift user-program line numbers in tracebacks. Same Context, so the
+        // builtins.open patch and atexit hook persist into the program eval.
+        if (flushUnclosedWrites) {
+            ctx.eval(
+                Source
+                    .newBuilder("python", FLUSH_UNCLOSED_SHIM, "<kash-flush-shim>")
+                    .build(),
+            )
+        }
         // Set sys.argv before user code runs. GraalPy exposes sys via the
         // python language bindings; the simplest way is to splice a prelude.
         val prelude = buildSysArgvPrelude(sysArgvScript, scriptArgs)
@@ -467,6 +502,54 @@ public class GraalPyEngine : PythonEngine {
          * [com.accucodeai.kash.fs.FsLabel.ENGINE_CACHE].
          */
         public const val CACHE_MOUNT_POINT: String = "/.cache/graalpy"
+
+        /**
+         * Python source that makes GraalPy flush writes left open at session
+         * end, approximating CPython's refcount-driven close. It wraps
+         * `builtins.open`/`io.open` to record writable file objects, then
+         * registers an `atexit` hook that `close()`s any still-open survivors
+         * — close (not just flush) because kash's `InMemoryChannel` only
+         * drains to the FS on close. GraalPy runs `atexit` from
+         * `finalizeContext` (before stream teardown) on both the normal and
+         * uncaught-exception paths, so the flush happens whether or not the
+         * program raised.
+         *
+         * Tracking holds strong references, so writable files opened but never
+         * closed are retained until exit — that is exactly the data we must
+         * flush, so the retained memory is bounded by the unflushed bytes.
+         * Defined and torn down inside a function so only the `builtins`/`io`
+         * patch and the `atexit` registration outlive it; no helper names leak
+         * into the program's globals.
+         */
+        internal val FLUSH_UNCLOSED_SHIM: String =
+            """
+            def __kash_install_flush():
+                import builtins, atexit, io
+                real_open = builtins.open
+                unclosed = []
+                def tracking_open(*args, **kwargs):
+                    f = real_open(*args, **kwargs)
+                    try:
+                        if f.writable():
+                            unclosed.append(f)
+                    except Exception:
+                        pass
+                    return f
+                tracking_open.__wrapped__ = real_open
+                builtins.open = tracking_open
+                io.open = tracking_open
+                def flush_unclosed():
+                    for f in unclosed:
+                        try:
+                            if not f.closed:
+                                f.close()
+                        except Exception:
+                            pass
+                    unclosed.clear()
+                atexit.register(flush_unclosed)
+            __kash_install_flush()
+            del __kash_install_flush
+            """.trimIndent()
 
         // Python-safe string literal: backslash-escape backslashes and double
         // quotes, then wrap. Sufficient for argv strings — they are not

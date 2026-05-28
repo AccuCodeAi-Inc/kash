@@ -30,9 +30,13 @@ class PathResolutionTest {
             assertEquals("echo\n", r.stdout)
         }
 
-    @Test fun type_p_echo_returns_usr_bin_path() =
+    @Test fun type_capital_p_echo_returns_usr_bin_path() =
         runTest {
-            val r = Kash(registry = standardRegistry()).exec("type -p echo")
+            // echo is a shell builtin that is ALSO mounted as a file at
+            // /usr/bin/echo (ToolsFs). Per bash, lowercase `type -p` stays
+            // silent for a builtin; capital `type -P` forces the PATH search
+            // and reports the file. (bash 5.3: `type -P echo` → /usr/bin/echo.)
+            val r = Kash(registry = standardRegistry()).exec("type -P echo")
             assertEquals(0, r.exitCode, "stderr=${r.stderr}")
             assertEquals("/usr/bin/echo\n", r.stdout)
         }
@@ -51,10 +55,13 @@ class PathResolutionTest {
             assertEquals(":\n", r.stdout)
         }
 
-    @Test fun command_dash_v_keyword_exits_one() =
+    @Test fun command_dash_v_keyword_echoes_name_and_exits_zero() =
         runTest {
+            // bash convention: `command -v <keyword>` echoes the keyword name
+            // and exits 0 (verified against bash 5.3: `command -v if` → "if",
+            // rc 0). It does NOT fail like a missing utility.
             val r = Kash(registry = standardRegistry()).exec("command -v if; echo done=\$?")
-            assertEquals("done=1\n", r.stdout)
+            assertEquals("if\ndone=0\n", r.stdout)
         }
 
     @Test fun empty_path_only_special_builtins_resolve() =
@@ -68,8 +75,12 @@ class PathResolutionTest {
 
     @Test fun empty_path_blocks_utility_resolution() =
         runTest {
-            val r = Kash(registry = standardRegistry()).exec($$"PATH= echo hi 2>/dev/null; echo rc=$?")
-            // echo wasn't found → exit 127.
+            // Must use a TOOL-kind utility, not a builtin: with PATH cleared,
+            // /usr/bin is no longer searched, so a real utility can't resolve.
+            // (echo is a shell builtin and would run regardless of PATH — that
+            // is exactly what bash does — so `sort` is the honest test here.)
+            val r = Kash(registry = standardRegistry()).exec($$"PATH= sort 2>/dev/null; echo rc=$?")
+            // sort wasn't found → exit 127.
             assertTrue(r.stdout.trim().endsWith("rc=127"), "got: ${r.stdout}")
         }
 

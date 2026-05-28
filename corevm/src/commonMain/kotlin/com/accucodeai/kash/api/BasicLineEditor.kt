@@ -1,5 +1,6 @@
 package com.accucodeai.kash.api
 
+import com.accucodeai.kash.api.ansi.Ansi
 import com.accucodeai.kash.api.terminal.Candidate
 import com.accucodeai.kash.api.terminal.Completer
 import com.accucodeai.kash.api.terminal.Key
@@ -10,19 +11,36 @@ import com.accucodeai.kash.api.terminal.TerminalControl
 /**
  * Pure-Kotlin [LineEditor] on top of [TerminalControl]. The default — and
  * currently only — line editor; serves the top-level shell, recursive
- * `kash`-in-kash invocations, and the eventual JS target uniformly.
+ * `kash`-in-kash invocations, and the wasmJs target uniformly.
  *
- * V1 scope (deliberately small — extend as needed):
+ * Multi-line buffer model. A single [StringBuilder] holds the entire
+ * editable input including any explicit `\n` line breaks the user
+ * inserted; a single integer cursor points into it. Submission is
+ * driven by `isComplete(buf)` — if the shell's parser says the
+ * accumulated text is complete, Enter returns it; otherwise Enter
+ * inserts a `\n` and the user keeps editing. Alt-Enter always
+ * inserts a `\n` regardless. This mirrors fish / PSReadLine /
+ * reedline — the user can revisit and edit any line of a multi-line
+ * input until they choose to submit. Up/Down move within the buffer
+ * when there are rows above/below the cursor; at the top or bottom
+ * row they fall through to history navigation.
  *
- *  - cursor: ←/→, Home/End, Ctrl-A/Ctrl-E, Ctrl-B/Ctrl-F
- *  - edit: Backspace, Delete, Ctrl-K (kill to EOL), Ctrl-U (kill line),
- *    Ctrl-W (kill prev word)
- *  - history: ↑/↓ navigate an in-memory ring buffer
- *  - continuation: when [LineEditor.readLine.isComplete] returns false, draws
- *    the continuation prompt and keeps reading
- *  - backslash-newline: `\<Enter>` joins lines without consulting isComplete
+ * V1 scope:
+ *
+ *  - cursor: ←/→, Home/End, Ctrl-A/Ctrl-E, Ctrl-B/Ctrl-F (line-aware)
+ *  - edit: Backspace, Delete, Ctrl-K (kill to logical-line end),
+ *    Ctrl-U (kill from logical-line start to cursor), Ctrl-W
+ *    (kill prev word, stops at `\n`)
+ *  - history: ↑/↓ navigate an in-memory ring buffer when at the
+ *    visual top/bottom of the buffer; otherwise move within the
+ *    buffer. Recall lands the cursor at the end of the first line
+ *    of the recalled entry (fish convention).
+ *  - submit: Enter via [LineEditor.readLine.isComplete] validator;
+ *    Alt-Enter to force-insert `\n`
+ *  - paste: bracketed-paste arrives whole via `Key.Paste`, including
+ *    embedded `\n`s — the user can edit and then submit
  *  - Ctrl-C → [LineEditorResult.Interrupted]; Ctrl-D at empty buffer →
- *    [LineEditorResult.Eof]
+ *    [LineEditorResult.Eof]; Ctrl-D otherwise = forward-delete
  *
  * Tab completion: opt-in via the [completer] constructor parameter — see
  * [com.accucodeai.kash.api.terminal.Completer]. Bash-style: unique match
@@ -30,13 +48,21 @@ import com.accucodeai.kash.api.terminal.TerminalControl
  * prefix; second TAB on the same state lists candidates above the prompt.
  *
  * Not in v1: history search (Ctrl-R), vi mode, mouse, syntax highlighting,
- * multi-byte display-width handling.
- * Wrap-to-next-row mid-line is approximated by re-drawing the whole line on
- * every keystroke; that's slow for very long lines but bounded.
+ * a queued-input panel during agent streams (see Phase 2 plan).
+ * Wrap-to-next-row mid-line is approximated by re-drawing the whole
+ * buffer on every keystroke; that's slow for very long inputs but
+ * bounded. Buffers rendering taller than the visible viewport let
+ * their top rows scroll into scrollback and become un-editable in
+ * place — that's a universal limit of in-place terminal line editing,
+ * matched by readline / fish / PSReadLine.
  *
- * Cursor math assumes each codepoint is one column wide. CJK / wide chars
- * render correctly to the user but the cursor position drifts; that's a
- * known v1 limitation worth fixing if it bites.
+ * Wide-character handling: cursor accounting goes through [charWidth]
+ * (see [Wcwidth.kt]) so CJK / fullwidth glyphs that occupy two grid
+ * cells are tracked correctly; backspace and arrow keys jump by
+ * codepoints (one wide char = one step), and on-screen cursor
+ * positioning uses display columns. JVM terminals (iTerm2 / WezTerm /
+ * etc.) follow the same wcwidth model by default, so the same logic
+ * is correct on both targets.
  */
 public class BasicLineEditor(
     private val terminal: TerminalControl,
@@ -61,487 +87,555 @@ public class BasicLineEditor(
 
     override suspend fun history(): List<String> = history.toList()
 
+    /**
+     * Read one (possibly multi-line) input until the user submits. Stays
+     * in raw mode for the duration; redraws on every keystroke.
+     *
+     * @param prompt drawn at column 0 of the first row.
+     * @param continuationPrompt kept in the signature for API compatibility
+     *   with the prior two-loop design. The multi-line model doesn't draw
+     *   a per-row continuation sigil — every editable row sits flush-left
+     *   and the buffer is honest about whitespace. If a future caller wants
+     *   PS2-style continuation marks we can repaint them on the inner rows
+     *   without changing the API.
+     * @param isComplete invoked with the current buffer when the user
+     *   presses Enter. Returning true causes [LineEditorResult.Line] to
+     *   be returned; false causes the editor to insert a `\n` and continue
+     *   editing. Alt-Enter bypasses this and always inserts `\n`.
+     */
     override suspend fun readLine(
         prompt: String,
         continuationPrompt: String,
         isComplete: (accumulated: String) -> Boolean,
     ): LineEditorResult {
-        // Each iteration reads one physical line (until Enter). The
-        // outer loop handles multi-line continuation — when the accumulated
-        // buffer is incomplete, we re-prompt with [continuationPrompt].
+        // [continuationPrompt] is retained on the interface for API
+        // compatibility with the prior two-loop design. The new model
+        // doesn't draw it because every editable row sits flush-left;
+        // re-introducing a PS2 sigil on inner rows is a render-time
+        // tweak that doesn't need a signature change.
         terminal.enterRawMode()
         try {
-            val lines = mutableListOf<String>()
-            var firstLine = true
+            val buf = StringBuilder()
+            var cursor = 0
+
+            // History navigation snapshot: when the user presses ↑ at the
+            // top row we walk backward; ↓ at the bottom walks forward.
+            // `historyIndex == history.size` means "current buffer (not
+            // from history)" and `stash` holds whatever the user had
+            // typed before they started navigating, so ↓ back to the
+            // present restores it.
+            var historyIndex = history.size
+            var stash: String? = null
+
+            // Tab-completion second-press state. When the first TAB on an
+            // ambiguous prefix produces no LCP extension, bash beeps; a
+            // second TAB on the exact same buffer+cursor lists the
+            // candidates. We track the buffer snapshot at which the next
+            // TAB should list, and clear it on any non-TAB key.
+            var tabListArmedBuf: String? = null
+            var tabListArmedCursor: Int = -1
+
+            // Multi-row redraw state. The previous single-line version
+            // cleared one row with `\r[K`, which left wrapped rows
+            // above the cursor untouched and corrupted long inputs.
+            // We now walk back to where the previous render's cursor
+            // ended up (saved as `prevCursorRow`), erase to end of
+            // display, and re-render the whole buffer. With explicit
+            // `\n` breaks in the buffer the same algorithm holds —
+            // [simulateTermPos] honors `\n` as a forced row break.
+            var prevHadContent = false
+            var prevCursorRow = 0
+
+            // ---- Line-aware helpers over `buf` -----------------------
+
+            fun lineStart(at: Int): Int {
+                var i = at
+                while (i > 0 && buf[i - 1] != '\n') i--
+                return i
+            }
+
+            fun lineEnd(at: Int): Int {
+                var i = at
+                while (i < buf.length && buf[i] != '\n') i++
+                return i
+            }
+
+            fun colOf(at: Int): Int = at - lineStart(at)
+
+            fun rowOf(at: Int): Int {
+                var count = 0
+                for (i in 0 until at) if (buf[i] == '\n') count++
+                return count
+            }
+
+            fun lineCount(): Int {
+                var count = 1
+                for (i in 0 until buf.length) if (buf[i] == '\n') count++
+                return count
+            }
+
+            // ---- Display geometry ------------------------------------
+
+            // Walk [text] character by character applying the terminal's
+            // write/wrap rule: a char of display width `w` first wraps
+            // if it wouldn't fit on the current row (`col + w > cols`),
+            // then advances col by w. `\n` forces a row break with no
+            // wrap check. Returns the (row, col) the cursor sits at
+            // after the last char was written.
+            //
+            // Wide-char aware via [charWidth] — each CJK codepoint
+            // occupies two grid cells so a buf of N codepoints can be
+            // 2N display columns.
+            //
+            // Pending-wrap behavior: when the last char fills the row
+            // exactly so col reaches cols, the wrap hasn't actually
+            // happened yet — the cursor stays latched at the previous
+            // row's right margin (`cols - 1`) until the next char
+            // forces it. xterm and the wasmJs grid both implement this.
+            fun simulateTermPos(
+                text: CharSequence,
+                cols: Int,
+            ): Pair<Int, Int> {
+                var row = 0
+                var col = 0
+                for (i in text.indices) {
+                    val ch = text[i]
+                    if (ch == '\n') {
+                        row++
+                        col = 0
+                        continue
+                    }
+                    val w = charWidth(ch)
+                    if (col + w > cols) {
+                        row++
+                        col = 0
+                    }
+                    col += w
+                }
+                return if (col >= cols && text.isNotEmpty()) row to (cols - 1) else row to col
+            }
+
+            // Emit `buf` to the terminal, translating bare `\n` to
+            // `\r\n`. Raw mode on JVM doesn't auto-CR on LF (no `ONLCR`),
+            // so a bare `\n` would leave the cursor at the same column
+            // one row down — a "stair-step" of input. The wasmJs grid's
+            // AnsiInterpreter already treats `\n` as CR+LF (see
+            // `handleGround`), so the conversion is harmless there.
+            fun bufWire(): String = buf.toString().replace("\n", "\r\n")
+
+            suspend fun redraw() {
+                val cols = terminal.size().cols.coerceAtLeast(1)
+                if (prevHadContent) {
+                    // Walk back to the top-left of the previously
+                    // rendered block. `Ansi.cursorUp(0)` returns ""
+                    // so no guard on `prevCursorRow > 0` is needed.
+                    terminal.write(Ansi.cursorUp(prevCursorRow))
+                    terminal.write("\r" + Ansi.ERASE_TO_END_OF_DISPLAY)
+                } else {
+                    terminal.write("\r" + Ansi.ERASE_TO_END_OF_LINE)
+                }
+                terminal.write(prompt)
+                terminal.write(bufWire())
+
+                val totalText = prompt + buf.toString()
+                val cursorText = prompt + buf.substring(0, cursor)
+                val (writtenRow, writtenCol) = simulateTermPos(totalText, cols)
+                val (targetRow, targetCol) = simulateTermPos(cursorText, cols)
+                terminal.write(Ansi.cursorUp(writtenRow - targetRow))
+                when {
+                    targetCol < writtenCol -> terminal.write(Ansi.cursorBack(writtenCol - targetCol))
+                    targetCol > writtenCol -> terminal.write(Ansi.cursorForward(targetCol - writtenCol))
+                }
+                terminal.flush()
+
+                prevHadContent = totalText.isNotEmpty()
+                prevCursorRow = targetRow
+            }
+
+            // Move the cursor below the entire rendered input block, at
+            // column 0 — used when submitting so the caller's output
+            // starts on a fresh line below the user's edited input.
+            // Without this, if the cursor was inside the buffer when
+            // Enter was pressed, the next write would overwrite the
+            // trailing rows of input.
+            suspend fun cursorBelowInput() {
+                val cols = terminal.size().cols.coerceAtLeast(1)
+                val totalText = prompt + buf.toString()
+                val cursorText = prompt + buf.substring(0, cursor)
+                val (writtenRow, _) = simulateTermPos(totalText, cols)
+                val (targetRow, _) = simulateTermPos(cursorText, cols)
+                terminal.write(Ansi.cursorDown(writtenRow - targetRow))
+                terminal.write("\r\n")
+                terminal.flush()
+            }
+
+            redraw()
+
             while (true) {
-                val activePrompt = if (firstLine) prompt else continuationPrompt
-                // Snapshot history position only for the current physical line —
-                // ↑/↓ navigate within the editor of *this* line, not the
-                // accumulator. Same as bash's PS2-continuation behavior.
-                when (val line = readOnePhysicalLine(activePrompt)) {
-                    is PhysicalLine.Done -> {
-                        // Backslash continuation: drop the trailing `\` and keep
-                        // reading on the next line without consulting isComplete.
-                        if (line.text.endsWith("\\")) {
-                            lines += line.text.dropLast(1)
-                            firstLine = false
-                            continue
-                        }
-                        lines += line.text
-                        val accumulated = lines.joinToString("\n")
-                        if (isComplete(accumulated)) {
-                            return LineEditorResult.Line(accumulated)
-                        }
-                        firstLine = false
-                    }
-
-                    is PhysicalLine.Continue -> {
-                        // Alt-Enter: bank the line and re-prompt on PS2 without
-                        // consulting isComplete. Pairs with the [Key.Named.ALT_ENTER]
-                        // case in [readOnePhysicalLine].
-                        lines += line.text
-                        firstLine = false
-                    }
-
-                    PhysicalLine.Interrupted -> {
-                        return LineEditorResult.Interrupted
-                    }
-
-                    PhysicalLine.Eof -> {
-                        // Ctrl-D at an empty buffer (with no accumulated input)
-                        // is EOF. Anywhere else it's "submit what's here" — same
-                        // as bash. lines is empty iff this is the very first
-                        // input AND nothing was typed.
-                        if (lines.isEmpty()) return LineEditorResult.Eof
-                        return LineEditorResult.Line(lines.joinToString("\n"))
-                    }
+                val key = terminal.readKey()
+                // Any non-TAB key disarms the "list candidates on next
+                // TAB" state — matches bash, where editing the buffer
+                // between TABs resets the listing affordance.
+                if (key !is Key.Named || key != Key.Named.TAB) {
+                    tabListArmedBuf = null
+                    tabListArmedCursor = -1
                 }
-            }
-        } finally {
-            terminal.exitRawMode()
-        }
-    }
+                when (key) {
+                    is Key.Char -> {
+                        val s = codepointToString(key.codepoint)
+                        buf.insert(cursor, s)
+                        cursor += s.length
+                        redraw()
+                    }
 
-    private sealed interface PhysicalLine {
-        data class Done(
-            val text: String,
-        ) : PhysicalLine
-
-        /**
-         * The user pressed Alt-Enter — submit the current physical line
-         * but don't consult [LineEditor.readLine.isComplete]; the outer
-         * loop should re-prompt with PS2 and accumulate the next line.
-         */
-        data class Continue(
-            val text: String,
-        ) : PhysicalLine
-
-        data object Interrupted : PhysicalLine
-
-        data object Eof : PhysicalLine
-    }
-
-    /**
-     * Read one physical line until Enter is pressed. Handles cursor and
-     * edit ops in-place; redraws the line on every keystroke so the user
-     * sees their edits.
-     */
-    private suspend fun readOnePhysicalLine(prompt: String): PhysicalLine {
-        val buf = StringBuilder()
-        var cursor = 0
-        // History navigation snapshot: when the user presses ↑ we walk
-        // backward; ↓ walks forward. `historyIndex == history.size` means
-        // "current line (not from history)" and stash holds whatever the
-        // user had typed before they started navigating, so ↓ back to the
-        // present restores it.
-        var historyIndex = history.size
-        var stash: String? = null
-
-        // Tab-completion second-press state. When the first TAB on an
-        // ambiguous prefix produces no LCP extension, bash beeps; a second
-        // TAB on the exact same buffer+cursor lists the candidates. We
-        // track the buffer snapshot at which the next TAB should list,
-        // and clear it on any non-TAB key.
-        var tabListArmedBuf: String? = null
-        var tabListArmedCursor: Int = -1
-
-        // Multi-row redraw state. The previous implementation cleared
-        // one row with `\r[K`, which silently left wrapped rows above
-        // the current cursor row untouched whenever prompt+buf exceeded
-        // the terminal width — long input duplicated / disappeared on
-        // every keystroke. We now mirror readline's algorithm: track
-        // where the previous render's cursor ended up, walk back to the
-        // top-left of that block, and erase to end of display.
-        var prevTotalLen = 0
-        var prevCols = 1
-        var prevCursorPos = 0
-
-        // Map a logical character position (0..totalLen) to the terminal
-        // cursor's actual (row, col). For positions that are an exact
-        // non-zero multiple of cols, the cursor is "pending-wrap"-latched
-        // at the right margin of the *previous* row, not at column 0 of
-        // the next row. Treat that explicitly — the old naive formula
-        // walked the cursor up one row too many on every redraw, which
-        // eroded screen content above the prompt every time prompt+buf
-        // hit a cols boundary.
-        fun termPos(
-            pos: Int,
-            cols: Int,
-        ): Pair<Int, Int> {
-            if (pos == 0) return 0 to 0
-            if (pos % cols == 0) return (pos / cols - 1) to (cols - 1)
-            return (pos / cols) to (pos % cols)
-        }
-
-        suspend fun redraw() {
-            val cols = terminal.size().cols.coerceAtLeast(1)
-            // Terminal resized between redraws. The wasm grid reflows
-            // wrapped lines on resize, leaving the grid cursor at the
-            // SAME logical position (prompt+cursor offset) within the
-            // text — just laid out at the new column count. So our
-            // `prevCursorPos` / `prevTotalLen` are still semantically
-            // correct; we just need the up-walk math (termPos) to use
-            // the NEW cols, otherwise we walk to the wrong row and
-            // either dup the prompt (under-clear) or erase output
-            // above (over-clear).
-            if (cols != prevCols) {
-                prevCols = cols
-            }
-            if (prevTotalLen > 0) {
-                val (prevCurRow, _) = termPos(prevCursorPos, prevCols)
-                if (prevCurRow > 0) terminal.write("[${prevCurRow}A")
-                terminal.write("\r[J")
-            } else {
-                terminal.write("\r[K")
-            }
-            terminal.write(prompt)
-            terminal.write(buf.toString())
-
-            val totalLen = prompt.length + buf.length
-            val cursorPos = prompt.length + cursor
-            val (writtenRow, writtenCol) = termPos(totalLen, cols)
-            val (targetRow, targetCol) = termPos(cursorPos, cols)
-            if (writtenRow > targetRow) terminal.write("[${writtenRow - targetRow}A")
-            when {
-                targetCol < writtenCol -> terminal.write("[${writtenCol - targetCol}D")
-                targetCol > writtenCol -> terminal.write("[${targetCol - writtenCol}C")
-            }
-            terminal.flush()
-
-            prevTotalLen = totalLen
-            prevCols = cols
-            prevCursorPos = cursorPos
-        }
-
-        redraw()
-
-        while (true) {
-            val key = terminal.readKey()
-            // Any non-TAB key disarms the "list candidates on next TAB" state —
-            // matches bash, where editing the buffer between TABs resets the
-            // listing affordance.
-            if (key !is Key.Named || key != Key.Named.TAB) {
-                tabListArmedBuf = null
-                tabListArmedCursor = -1
-            }
-            when (key) {
-                is Key.Char -> {
-                    val s = codepointToString(key.codepoint)
-                    buf.insert(cursor, s)
-                    cursor += s.length
-                    redraw()
-                }
-
-                is Key.Ctrl -> {
-                    when (key.letter) {
-                        'A' -> {
-                            cursor = 0
-                            redraw()
-                        }
-
-                        'E' -> {
-                            cursor = buf.length
-                            redraw()
-                        }
-
-                        'B' -> {
-                            if (cursor > 0) {
-                                cursor--
+                    is Key.Ctrl -> {
+                        when (key.letter) {
+                            'A' -> {
+                                cursor = lineStart(cursor)
                                 redraw()
                             }
-                        }
 
-                        'F' -> {
-                            if (cursor < buf.length) {
-                                cursor++
+                            'E' -> {
+                                cursor = lineEnd(cursor)
                                 redraw()
                             }
-                        }
 
-                        'K' -> {
-                            // Kill to end of line.
-                            if (cursor < buf.length) {
-                                buf.deleteRange(cursor, buf.length)
-                                redraw()
+                            'B' -> {
+                                if (cursor > 0) {
+                                    cursor--
+                                    redraw()
+                                }
                             }
-                        }
 
-                        'U' -> {
-                            // Kill whole line.
-                            if (buf.isNotEmpty()) {
-                                buf.clear()
-                                cursor = 0
-                                redraw()
+                            'F' -> {
+                                if (cursor < buf.length) {
+                                    cursor++
+                                    redraw()
+                                }
                             }
-                        }
 
-                        'W' -> {
-                            // Kill previous word: skip spaces, then non-spaces.
-                            if (cursor > 0) {
-                                var i = cursor
-                                while (i > 0 && buf[i - 1].isWhitespace()) i--
-                                while (i > 0 && !buf[i - 1].isWhitespace()) i--
-                                buf.deleteRange(i, cursor)
-                                cursor = i
-                                redraw()
+                            'K' -> {
+                                // Kill to end of current logical line; do
+                                // not delete the trailing `\n`.
+                                val end = lineEnd(cursor)
+                                if (cursor < end) {
+                                    buf.deleteRange(cursor, end)
+                                    redraw()
+                                }
                             }
-                        }
 
-                        'C' -> {
-                            // Ctrl-C: write a fresh line and report Interrupted —
-                            // the outer readLine returns Interrupted, and the
-                            // shell discards partial input and reprompts.
-                            terminal.write("^C\r\n")
-                            terminal.flush()
-                            return PhysicalLine.Interrupted
-                        }
+                            'U' -> {
+                                // Kill from start of current logical line
+                                // up to the cursor. Bash semantics — only
+                                // the current line, never crosses `\n`.
+                                val start = lineStart(cursor)
+                                if (start < cursor) {
+                                    buf.deleteRange(start, cursor)
+                                    cursor = start
+                                    redraw()
+                                }
+                            }
 
-                        'D' -> {
-                            // Ctrl-D: EOF iff buffer is empty.
-                            if (buf.isEmpty()) {
-                                terminal.write("\r\n")
+                            'W' -> {
+                                // Kill previous word, stopping at `\n`
+                                // boundaries so we never devour the prior
+                                // logical line.
+                                if (cursor > 0) {
+                                    var i = cursor
+                                    while (i > 0 && buf[i - 1] != '\n' && buf[i - 1].isWhitespace()) i--
+                                    while (i > 0 && buf[i - 1] != '\n' && !buf[i - 1].isWhitespace()) i--
+                                    if (i < cursor) {
+                                        buf.deleteRange(i, cursor)
+                                        cursor = i
+                                        redraw()
+                                    }
+                                }
+                            }
+
+                            'C' -> {
+                                // Ctrl-C: walk below the input, emit ^C,
+                                // and return Interrupted. The shell
+                                // discards the partial input and reprompts.
+                                cursorBelowInput()
+                                terminal.write("^C\r\n")
                                 terminal.flush()
-                                return PhysicalLine.Eof
+                                return LineEditorResult.Interrupted
                             }
-                            // Otherwise: forward-delete (like Delete key).
-                            if (cursor < buf.length) {
-                                buf.deleteAt(cursor)
+
+                            'D' -> {
+                                // Ctrl-D: EOF iff the buffer is empty;
+                                // otherwise forward-delete (like Delete).
+                                if (buf.isEmpty()) {
+                                    terminal.write("\r\n")
+                                    terminal.flush()
+                                    return LineEditorResult.Eof
+                                }
+                                if (cursor < buf.length) {
+                                    buf.deleteAt(cursor)
+                                    redraw()
+                                }
+                            }
+
+                            'L' -> {
+                                // Clear screen and redraw the prompt
+                                // fresh at (0,0). Reset the walk-back
+                                // state since there's nothing above
+                                // anymore.
+                                terminal.write(Ansi.CLEAR_SCREEN_AND_HOME)
+                                prevHadContent = false
+                                prevCursorRow = 0
                                 redraw()
-                            }
-                        }
-
-                        'L' -> {
-                            // Clear screen and redraw prompt.
-                            terminal.write("[2J[H")
-                            redraw()
-                        }
-
-                        else -> {
-                            // Unhandled Ctrl-x: ignore.
-                        }
-                    }
-                }
-
-                Key.Named.ENTER -> {
-                    terminal.write("\r\n")
-                    terminal.flush()
-                    return PhysicalLine.Done(buf.toString())
-                }
-
-                Key.Named.BACKSPACE -> {
-                    if (cursor > 0) {
-                        buf.deleteAt(cursor - 1)
-                        cursor--
-                        redraw()
-                    }
-                }
-
-                Key.Named.DELETE -> {
-                    if (cursor < buf.length) {
-                        buf.deleteAt(cursor)
-                        redraw()
-                    }
-                }
-
-                Key.Named.LEFT -> {
-                    if (cursor > 0) {
-                        cursor--
-                        redraw()
-                    }
-                }
-
-                Key.Named.RIGHT -> {
-                    if (cursor < buf.length) {
-                        cursor++
-                        redraw()
-                    }
-                }
-
-                Key.Named.HOME -> {
-                    cursor = 0
-                    redraw()
-                }
-
-                Key.Named.END -> {
-                    cursor = buf.length
-                    redraw()
-                }
-
-                Key.Named.UP -> {
-                    if (historyIndex > 0) {
-                        if (historyIndex == history.size) stash = buf.toString()
-                        historyIndex--
-                        buf.clear()
-                        buf.append(history[historyIndex])
-                        cursor = buf.length
-                        redraw()
-                    }
-                }
-
-                Key.Named.DOWN -> {
-                    if (historyIndex < history.size) {
-                        historyIndex++
-                        buf.clear()
-                        if (historyIndex == history.size) {
-                            buf.append(stash ?: "")
-                            stash = null
-                        } else {
-                            buf.append(history[historyIndex])
-                        }
-                        cursor = buf.length
-                        redraw()
-                    }
-                }
-
-                Key.Named.TAB -> {
-                    val c = completer
-                    if (c == null) {
-                        // No completer wired in: legacy v1 behavior — insert
-                        // a literal tab so the character isn't silently lost.
-                        buf.insert(cursor, '\t')
-                        cursor++
-                        redraw()
-                    } else {
-                        val result = c.complete(buf.toString(), cursor)
-                        val isSecondTab =
-                            tabListArmedBuf == buf.toString() && tabListArmedCursor == cursor
-                        when {
-                            result.candidates.isEmpty() -> {
-                                bell()
-                                tabListArmedBuf = null
-                                tabListArmedCursor = -1
-                            }
-
-                            result.candidates.size == 1 -> {
-                                val cand = result.candidates[0]
-                                val (newBuf, newCursor) =
-                                    applyCompletion(
-                                        buf,
-                                        result.replaceStart,
-                                        result.replaceEnd,
-                                        cand.text + cand.trailing,
-                                    )
-                                buf.clear()
-                                buf.append(newBuf)
-                                cursor = newCursor
-                                redraw()
-                                tabListArmedBuf = null
-                                tabListArmedCursor = -1
                             }
 
                             else -> {
-                                val typed =
-                                    buf.substring(result.replaceStart, result.replaceEnd)
-                                if (result.commonPrefix.length > typed.length) {
-                                    // Extend to longest common prefix; arm
-                                    // for listing on the next TAB.
+                                // Unhandled Ctrl-x: ignore.
+                            }
+                        }
+                    }
+
+                    Key.Named.ENTER -> {
+                        if (isComplete(buf.toString())) {
+                            cursorBelowInput()
+                            return LineEditorResult.Line(buf.toString())
+                        }
+                        // Validator says "not done yet" — insert `\n`
+                        // at the cursor and stay in the buffer.
+                        buf.insert(cursor, '\n')
+                        cursor++
+                        redraw()
+                    }
+
+                    Key.Named.ALT_ENTER -> {
+                        // Always insert `\n` regardless of the
+                        // validator — the "I know this isn't done yet,
+                        // give me a fresh line" override.
+                        buf.insert(cursor, '\n')
+                        cursor++
+                        redraw()
+                    }
+
+                    Key.Named.BACKSPACE -> {
+                        if (cursor > 0) {
+                            // Deletes the char before the cursor. If
+                            // that char is `\n`, naturally joins lines.
+                            buf.deleteAt(cursor - 1)
+                            cursor--
+                            redraw()
+                        }
+                    }
+
+                    Key.Named.DELETE -> {
+                        if (cursor < buf.length) {
+                            // If the char at cursor is `\n`, naturally
+                            // joins with the next line.
+                            buf.deleteAt(cursor)
+                            redraw()
+                        }
+                    }
+
+                    Key.Named.LEFT -> {
+                        if (cursor > 0) {
+                            cursor--
+                            redraw()
+                        }
+                    }
+
+                    Key.Named.RIGHT -> {
+                        if (cursor < buf.length) {
+                            cursor++
+                            redraw()
+                        }
+                    }
+
+                    Key.Named.HOME -> {
+                        cursor = lineStart(cursor)
+                        redraw()
+                    }
+
+                    Key.Named.END -> {
+                        cursor = lineEnd(cursor)
+                        redraw()
+                    }
+
+                    Key.Named.UP -> {
+                        val row = rowOf(cursor)
+                        if (row > 0) {
+                            // Multi-row buffer — move cursor up one
+                            // logical line preserving column.
+                            val targetCol = colOf(cursor)
+                            val curLineStart = lineStart(cursor)
+                            val prevLineEnd = curLineStart - 1 // index of '\n'
+                            val prevLineStart = lineStart(prevLineEnd)
+                            val prevLineLen = prevLineEnd - prevLineStart
+                            cursor = prevLineStart + minOf(targetCol, prevLineLen)
+                            redraw()
+                        } else if (historyIndex > 0) {
+                            // At top of buffer — fall through to history.
+                            if (historyIndex == history.size) stash = buf.toString()
+                            historyIndex--
+                            buf.clear()
+                            buf.append(history[historyIndex])
+                            // Fish convention: cursor lands at the end
+                            // of the first line of the recalled entry.
+                            cursor = lineEnd(0)
+                            redraw()
+                        }
+                    }
+
+                    Key.Named.DOWN -> {
+                        val row = rowOf(cursor)
+                        if (row < lineCount() - 1) {
+                            // Multi-row buffer — move cursor down one
+                            // logical line preserving column.
+                            val targetCol = colOf(cursor)
+                            val curLineEnd = lineEnd(cursor)
+                            val nextLineStart = curLineEnd + 1 // past the '\n'
+                            val nextLineEnd = lineEnd(nextLineStart)
+                            val nextLineLen = nextLineEnd - nextLineStart
+                            cursor = nextLineStart + minOf(targetCol, nextLineLen)
+                            redraw()
+                        } else if (historyIndex < history.size) {
+                            // At bottom of buffer — fall through to history.
+                            historyIndex++
+                            buf.clear()
+                            if (historyIndex == history.size) {
+                                buf.append(stash ?: "")
+                                stash = null
+                            } else {
+                                buf.append(history[historyIndex])
+                            }
+                            cursor = lineEnd(0)
+                            redraw()
+                        }
+                    }
+
+                    Key.Named.TAB -> {
+                        val c = completer
+                        if (c == null) {
+                            // No completer wired in: legacy behavior —
+                            // insert a literal tab so the keystroke
+                            // isn't silently lost.
+                            buf.insert(cursor, '\t')
+                            cursor++
+                            redraw()
+                        } else {
+                            val result = c.complete(buf.toString(), cursor)
+                            val isSecondTab =
+                                tabListArmedBuf == buf.toString() && tabListArmedCursor == cursor
+                            when {
+                                result.candidates.isEmpty() -> {
+                                    bell()
+                                    tabListArmedBuf = null
+                                    tabListArmedCursor = -1
+                                }
+
+                                result.candidates.size == 1 -> {
+                                    val cand = result.candidates[0]
                                     val (newBuf, newCursor) =
                                         applyCompletion(
                                             buf,
                                             result.replaceStart,
                                             result.replaceEnd,
-                                            result.commonPrefix,
+                                            cand.text + cand.trailing,
                                         )
                                     buf.clear()
                                     buf.append(newBuf)
                                     cursor = newCursor
                                     redraw()
-                                    tabListArmedBuf = buf.toString()
-                                    tabListArmedCursor = cursor
-                                } else if (isSecondTab) {
-                                    // Second TAB on the same state → list.
-                                    listCandidates(result.candidates)
-                                    // After listing, redraw the prompt fresh.
-                                    prevTotalLen = 0
-                                    redraw()
                                     tabListArmedBuf = null
                                     tabListArmedCursor = -1
-                                } else {
-                                    bell()
-                                    tabListArmedBuf = buf.toString()
-                                    tabListArmedCursor = cursor
+                                }
+
+                                else -> {
+                                    val typed =
+                                        buf.substring(result.replaceStart, result.replaceEnd)
+                                    if (result.commonPrefix.length > typed.length) {
+                                        val (newBuf, newCursor) =
+                                            applyCompletion(
+                                                buf,
+                                                result.replaceStart,
+                                                result.replaceEnd,
+                                                result.commonPrefix,
+                                            )
+                                        buf.clear()
+                                        buf.append(newBuf)
+                                        cursor = newCursor
+                                        redraw()
+                                        tabListArmedBuf = buf.toString()
+                                        tabListArmedCursor = cursor
+                                    } else if (isSecondTab) {
+                                        listCandidates(result.candidates)
+                                        prevHadContent = false
+                                        redraw()
+                                        tabListArmedBuf = null
+                                        tabListArmedCursor = -1
+                                    } else {
+                                        bell()
+                                        tabListArmedBuf = buf.toString()
+                                        tabListArmedCursor = cursor
+                                    }
                                 }
                             }
                         }
                     }
-                }
 
-                Key.Named.ESC, Key.Named.PGUP, Key.Named.PGDN, Key.Named.ALT_ENTER -> {
-                    // No bindings yet.
-                }
-
-                is Key.Function -> {
-                    // No bindings yet.
-                }
-
-                is Key.Paste -> {
-                    // Bracketed paste: insert the whole chunk verbatim and
-                    // redraw. Embedded `\n` stays as-is — the outer
-                    // readLine() loop treats this physical "line" as
-                    // potentially incomplete (consults isComplete after
-                    // Enter), so multi-line pastes get gathered correctly.
-                    // Without this branch the decoder's per-char fallback
-                    // would press Enter mid-paste and execute prematurely.
-                    buf.insert(cursor, key.text)
-                    cursor += key.text.length
-                    redraw()
-                }
-
-                is Key.PrintAbove -> {
-                    // Out-of-band line content (e.g. a drop-attached banner
-                    // that fires mid-typing). Walk back over the rendered
-                    // prompt + buffer, erase to end of screen, write the
-                    // banner + newline, reset redraw tracking, then
-                    // redraw the prompt on the fresh line below.
-                    //
-                    // ESC sequences use Kotlin's  escape rather
-                    // than a raw 0x1B byte — some editors strip raw ESC
-                    // on copy-paste, which would degrade to literal
-                    // "[J" rendering on screen.
-                    val esc = ""
-                    if (prevTotalLen > 0) {
-                        val (prevCurRow, _) = termPos(prevCursorPos, prevCols)
-                        if (prevCurRow > 0) terminal.write("$esc[${prevCurRow}A")
-                        terminal.write("\r$esc[J")
-                    } else {
-                        terminal.write("\r$esc[K")
+                    Key.Named.ESC, Key.Named.PGUP, Key.Named.PGDN -> {
+                        // No bindings yet.
                     }
-                    terminal.write(key.text)
-                    terminal.write("\r\n")
-                    // Reset so the next redraw uses the simple
-                    // "\r[K" branch (no walk-up) — cursor is at
-                    // column 0 of a fresh line below the banner.
-                    prevTotalLen = 0
-                    prevCursorPos = 0
-                    redraw()
+
+                    is Key.Function -> {
+                        // No bindings yet.
+                    }
+
+                    is Key.Paste -> {
+                        // Bracketed paste: insert the whole chunk
+                        // verbatim. Embedded `\n` is now a first-class
+                        // citizen — the user can edit any line of the
+                        // pasted block before submitting.
+                        buf.insert(cursor, key.text)
+                        cursor += key.text.length
+                        redraw()
+                    }
+
+                    is Key.PrintAbove -> {
+                        // Out-of-band line content (e.g. a drop-attached
+                        // banner that fires mid-typing). Walk back over
+                        // the rendered prompt + buffer, erase to end of
+                        // screen, write the banner + newline, reset
+                        // redraw tracking, then redraw the prompt on
+                        // the fresh line below.
+                        //
+                        // All ANSI sequences go through [Ansi] (in
+                        // `api/.../ansi/Ansi.kt`) so the source never
+                        // carries raw `` bytes — editors and
+                        // tools have a habit of stripping those on
+                        // save/copy and we'd silently end up writing
+                        // literal `[J` to the terminal.
+                        if (prevHadContent) {
+                            terminal.write(Ansi.cursorUp(prevCursorRow))
+                            terminal.write("\r" + Ansi.ERASE_TO_END_OF_DISPLAY)
+                        } else {
+                            terminal.write("\r" + Ansi.ERASE_TO_END_OF_LINE)
+                        }
+                        terminal.write(key.text)
+                        terminal.write("\r\n")
+                        prevHadContent = false
+                        prevCursorRow = 0
+                        redraw()
+                    }
                 }
             }
+            // Unreachable.
+            @Suppress("UNREACHABLE_CODE")
+            return LineEditorResult.Eof
+        } finally {
+            terminal.exitRawMode()
         }
     }
 
     /** ASCII BEL — the conventional "no completion / ambiguous first-tab" beep. */
     private suspend fun bell() {
-        terminal.write("")
+        terminal.write(Ansi.BEL)
         terminal.flush()
     }
 

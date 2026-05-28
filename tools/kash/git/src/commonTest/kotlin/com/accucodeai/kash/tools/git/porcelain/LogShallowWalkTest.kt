@@ -19,7 +19,7 @@ import com.accucodeai.kash.tools.git.plumbing.encodeCommit
 import com.accucodeai.kash.tools.git.plumbing.encodeTree
 import com.accucodeai.kash.tools.git.plumbing.framedObject
 import com.accucodeai.kash.tools.git.plumbing.objectSha
-import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.test.runTest
 import kotlinx.io.Buffer
 import kotlinx.io.readString
 import kotlin.test.Test
@@ -48,7 +48,7 @@ class LogShallowWalkTest {
         val stderr: String,
     )
 
-    private fun runGit(
+    private suspend fun runGit(
         fs: InMemoryFs,
         cwd: String,
         vararg args: String,
@@ -64,7 +64,7 @@ class LogShallowWalkTest {
                 stdout = out.asSuspendSink(),
                 stderr = err.asSuspendSink(),
             )
-        val res = runBlocking { GitCommand().run(args.toList(), ctx) }
+        val res = GitCommand().run(args.toList(), ctx)
         return Output(res.exitCode, out.readString(), err.readString())
     }
 
@@ -72,7 +72,7 @@ class LogShallowWalkTest {
      * Seed `/r/.git/` with a single commit whose parent is a sha we
      * never write. Returns the tip sha.
      */
-    private fun seedShallowRepo(fs: InMemoryFs): String {
+    private suspend fun seedShallowRepo(fs: InMemoryFs): String {
         val person = PersonStamp("Test User", "t@example.com", 1700000000, "+0000")
         val blob = "hello\n".encodeToByteArray()
         val blobSha = blobSha(blob)
@@ -86,48 +86,50 @@ class LogShallowWalkTest {
         fs.mkdirs(layout.gitDir)
         fs.mkdirs(layout.objectsDir)
         fs.mkdirs("${layout.gitDir}/refs/heads")
-
-        runBlocking {
-            val store = ObjectStore(layout, fs, null)
-            store.writeFramed(framedObject(ObjectType.BLOB, blob))
-            store.writeFramed(framedObject(ObjectType.TREE, tree))
-            store.writeFramed(framedObject(ObjectType.COMMIT, encodeCommit(commit)))
-            RefStore(layout, fs).writeRef("refs/heads/master", tipSha)
-            RefStore(layout, fs).writeHeadSymbolic("refs/heads/master")
-        }
+        val store = ObjectStore(layout, fs, null)
+        store.writeFramed(framedObject(ObjectType.BLOB, blob))
+        store.writeFramed(framedObject(ObjectType.TREE, tree))
+        store.writeFramed(framedObject(ObjectType.COMMIT, encodeCommit(commit)))
+        RefStore(layout, fs).writeRef("refs/heads/master", tipSha)
+        RefStore(layout, fs).writeHeadSymbolic("refs/heads/master")
         return tipSha
     }
 
-    @Test fun logEmitsTipAndExitsAtShallowBoundary() {
-        val fs = InMemoryFs()
-        val tipSha = seedShallowRepo(fs)
+    @Test fun logEmitsTipAndExitsAtShallowBoundary() =
+        runTest {
+            val fs = InMemoryFs()
+            val tipSha = seedShallowRepo(fs)
 
-        val out = runGit(fs, "/r", "log")
-        assertEquals(0, out.rc, "git log on shallow repo crashed: rc=${out.rc} stderr=${out.stderr}")
-        assertTrue(out.stdout.contains(tipSha), "expected tip sha $tipSha in log output; got: ${out.stdout}")
-        assertTrue(out.stdout.contains("tip"), "expected commit message 'tip' in log output; got: ${out.stdout}")
-        // Should not surface the missing parent's sha — the walk stops
-        // before we'd try to render it.
-        assertTrue(
-            !out.stdout.contains("0".repeat(40)),
-            "missing parent sha leaked into log output: ${out.stdout}",
-        )
-    }
+            val out = runGit(fs, "/r", "log")
+            assertEquals(0, out.rc, "git log on shallow repo crashed: rc=${out.rc} stderr=${out.stderr}")
+            assertTrue(out.stdout.contains(tipSha), "expected tip sha $tipSha in log output; got: ${out.stdout}")
+            assertTrue(out.stdout.contains("tip"), "expected commit message 'tip' in log output; got: ${out.stdout}")
+            // Should not surface the missing parent's sha — the walk stops
+            // before we'd try to render it.
+            assertTrue(
+                !out.stdout.contains("0".repeat(40)),
+                "missing parent sha leaked into log output: ${out.stdout}",
+            )
+        }
 
-    @Test fun logBareCountShorthandWorksOnShallowRepo() {
-        val fs = InMemoryFs()
-        val tipSha = seedShallowRepo(fs)
+    @Test fun logBareCountShorthandWorksOnShallowRepo() =
+        runTest {
+            val fs = InMemoryFs()
+            val tipSha = seedShallowRepo(fs)
 
-        // `-5` shorthand (synonym for `-n 5`). Combined with shallow walk
-        // it should produce exactly one line (only the tip is local).
-        val out = runGit(fs, "/r", "log", "-5", "--oneline")
-        assertEquals(0, out.rc, "git log -5 on shallow repo crashed: rc=${out.rc} stderr=${out.stderr}")
-        val lines =
-            out.stdout
-                .trim('\n')
-                .split('\n')
-                .filter { it.isNotBlank() }
-        assertEquals(1, lines.size, "expected exactly 1 oneline entry on shallow repo; got: ${out.stdout}")
-        assertTrue(lines[0].startsWith(tipSha.take(7)), "expected oneline to start with short sha; got: ${lines[0]}")
-    }
+            // `-5` shorthand (synonym for `-n 5`). Combined with shallow walk
+            // it should produce exactly one line (only the tip is local).
+            val out = runGit(fs, "/r", "log", "-5", "--oneline")
+            assertEquals(0, out.rc, "git log -5 on shallow repo crashed: rc=${out.rc} stderr=${out.stderr}")
+            val lines =
+                out.stdout
+                    .trim('\n')
+                    .split('\n')
+                    .filter { it.isNotBlank() }
+            assertEquals(1, lines.size, "expected exactly 1 oneline entry on shallow repo; got: ${out.stdout}")
+            assertTrue(
+                lines[0].startsWith(tipSha.take(7)),
+                "expected oneline to start with short sha; got: ${lines[0]}",
+            )
+        }
 }

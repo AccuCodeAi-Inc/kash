@@ -333,6 +333,23 @@ internal class PosixTerminalControl(
         keyChannel.trySend(key)
     }
 
+    override fun drainKeys(keep: (Key) -> Boolean): List<Key> {
+        // Non-blocking pull from [keyChannel]: try-receive in a loop
+        // until empty, partition into keepers vs discards, re-queue
+        // the keepers in original order so out-of-band events
+        // (Key.Paste / Key.PrintAbove) survive across a drain window.
+        val keepers = mutableListOf<Key>()
+        val discarded = mutableListOf<Key>()
+        while (true) {
+            val r = keyChannel.tryReceive()
+            if (!r.isSuccess) break
+            val k = r.getOrNull() ?: continue
+            if (keep(k)) keepers += k else discarded += k
+        }
+        for (k in keepers) keyChannel.trySend(k)
+        return discarded
+    }
+
     override suspend fun write(s: String) {
         writeRaw(s)
     }

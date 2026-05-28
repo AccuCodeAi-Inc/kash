@@ -215,14 +215,7 @@ public class ComposeTerminal : TerminalControl {
         // the agent during a tool-call window depends on this: the
         // drop's PrintAbove banner + Paste of `[attachment N]` need to
         // survive until the next readLine.
-        val keep = mutableListOf<Key>()
-        while (true) {
-            val r = keyChannel.tryReceive()
-            if (!r.isSuccess) break
-            val k = r.getOrNull() ?: continue
-            if (k is Key.Paste || k is Key.PrintAbove) keep += k
-        }
-        for (k in keep) keyChannel.trySend(k)
+        drainKeys(keep = { it is Key.Paste || it is Key.PrintAbove })
     }
 
     override suspend fun exitRawMode() {
@@ -244,6 +237,26 @@ public class ComposeTerminal : TerminalControl {
         // editor's readKey loop. Falling through cookedModeFeedKey
         // would either drop the event or echo garbage.
         keyChannel.trySend(key)
+    }
+
+    override fun drainKeys(keep: (Key) -> Boolean): List<Key> {
+        // Non-blocking pull from [keyChannel]: try-receive in a loop
+        // until empty, partition into keepers vs discards, re-queue
+        // the keepers in original order so out-of-band events
+        // (Key.Paste / Key.PrintAbove) survive across a drain window.
+        // Used both by [enterRawMode] (drop cooked echoes that already
+        // got handled) and by the agent's stream loop (swallow
+        // user-typed keys while no readLine consumer is active).
+        val keepers = mutableListOf<Key>()
+        val discarded = mutableListOf<Key>()
+        while (true) {
+            val r = keyChannel.tryReceive()
+            if (!r.isSuccess) break
+            val k = r.getOrNull() ?: continue
+            if (keep(k)) keepers += k else discarded += k
+        }
+        for (k in keepers) keyChannel.trySend(k)
+        return discarded
     }
 
     override suspend fun write(s: String) {
@@ -283,7 +296,21 @@ public class ComposeTerminal : TerminalControl {
             val lo = if (r == a0) c0 else 0
             val hi = if (r == a1) (c1 + 1).coerceAtMost(row.size) else row.size
             val sb2 = StringBuilder()
-            for (c in lo until hi) sb2.append(row[c].ch)
+            // Skip continuation cells (width == 0) — the leader's glyph
+            // already covers their visual columns, and emitting their
+            // padding-space would duplicate every wide char in the copy.
+            // Symmetric: if the selection starts on a continuation cell,
+            // the leader sits at lo-1 and was excluded by the range; pull
+            // it in so the copied text isn't visually missing its first
+            // wide glyph.
+            val effectiveLo =
+                if (lo in row.indices && row[lo].width == 0 && lo - 1 >= 0) lo - 1 else lo
+            for (c in effectiveLo until hi) {
+                if (row[c].width != 0) {
+                    sb2.append(row[c].ch)
+                    if (row[c].extras.isNotEmpty()) sb2.append(row[c].extras)
+                }
+            }
             // Trim trailing spaces — terminal cells are space-padded.
             var end = sb2.length
             while (end > 0 && sb2[end - 1] == ' ') end--

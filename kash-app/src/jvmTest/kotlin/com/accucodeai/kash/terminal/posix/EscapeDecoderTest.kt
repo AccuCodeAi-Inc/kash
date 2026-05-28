@@ -79,8 +79,11 @@ class EscapeDecoderTest {
     @Test fun tabAndEnter() =
         runBlocking {
             assertEquals(Key.Named.TAB, decodeOne(byteArrayOf(0x09)))
+            // CR (0x0D) submits → ENTER. LF (0x0A / Ctrl-J) inserts a literal
+            // newline in the multi-line buffer, so the decoder maps it to
+            // ALT_ENTER (the line editor's "newline" key) — not ENTER.
             assertEquals(Key.Named.ENTER, decodeOne(byteArrayOf(0x0D)))
-            assertEquals(Key.Named.ENTER, decodeOne(byteArrayOf(0x0A)))
+            assertEquals(Key.Named.ALT_ENTER, decodeOne(byteArrayOf(0x0A)))
         }
 
     @Test fun backspaceVariants() =

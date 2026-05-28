@@ -11,11 +11,13 @@ import kotlinx.io.Buffer
 import kotlinx.io.readString
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 
 private fun runPython(
     fs: com.accucodeai.kash.fs.FileSystem = InMemoryFs(),
     stdinText: String = "",
+    engine: GraalPyEngine = GraalPyEngine(),
     vararg args: String,
 ): Triple<Int, String, String> {
     val out = Buffer()
@@ -30,7 +32,7 @@ private fun runPython(
             stdout = out.asSuspendSink(),
             stderr = err.asSuspendSink(),
         )
-    val rc = runBlocking { Python3Command(GraalPyEngine()).run(args.toList(), ctx).exitCode }
+    val rc = runBlocking { Python3Command(engine).run(args.toList(), ctx).exitCode }
     return Triple(rc, out.readString(), err.readString())
 }
 
@@ -153,6 +155,70 @@ class GraalPyEngineTest {
             assertEquals(
                 "written from python\n",
                 fs.readBytes("/home/user/from_python.txt").decodeToString(),
+            )
+        }
+
+    @Test fun `unclosed write is flushed at session end (default on)`() =
+        runBlocking {
+            val fs = InMemoryFs()
+            // The documented agent gotcha: open + write with no close and no
+            // `with`. On CPython refcounting flushes this at end of statement;
+            // GraalPy doesn't, so the default-on flush shim must rescue it.
+            val (rc, _, err) =
+                runPython(
+                    fs = fs,
+                    args = arrayOf("-c", "open('/home/user/orphan.txt', 'w').write('hello\\n')"),
+                )
+            assertEquals(0, rc, "stderr: $err")
+            assertTrue(
+                fs.exists("/home/user/orphan.txt"),
+                "orphaned write should be flushed to kash FS at session end",
+            )
+            assertEquals(
+                "hello\n",
+                fs.readBytes("/home/user/orphan.txt").decodeToString(),
+            )
+        }
+
+    @Test fun `unclosed write is lost when flush toggle is off`() =
+        runBlocking {
+            val fs = InMemoryFs()
+            // With the shim disabled we get raw GraalPy semantics: the orphaned
+            // BufferedWriter is never flushed/closed, so nothing lands in kash
+            // FS. This pins the quirk (and proves the toggle actually gates it).
+            val (rc, _, err) =
+                runPython(
+                    fs = fs,
+                    engine = GraalPyEngine(flushUnclosedWrites = false),
+                    args = arrayOf("-c", "open('/home/user/orphan.txt', 'w').write('hello\\n')"),
+                )
+            assertEquals(0, rc, "stderr: $err")
+            assertFalse(
+                fs.exists("/home/user/orphan.txt"),
+                "without the flush shim the unclosed write should never reach kash FS",
+            )
+        }
+
+    @Test fun `unclosed write is flushed even when the program raises`() =
+        runBlocking {
+            val fs = InMemoryFs()
+            // atexit runs from finalizeContext on the uncaught-exception path
+            // too, so a crash after an orphaned write still flushes the bytes.
+            val (rc, _, _) =
+                runPython(
+                    fs = fs,
+                    args =
+                        arrayOf(
+                            "-c",
+                            "open('/home/user/orphan.txt', 'w').write('partial\\n')\n" +
+                                "raise ValueError('boom')\n",
+                        ),
+                )
+            assertEquals(1, rc)
+            assertTrue(fs.exists("/home/user/orphan.txt"), "write before the crash should still flush")
+            assertEquals(
+                "partial\n",
+                fs.readBytes("/home/user/orphan.txt").decodeToString(),
             )
         }
 

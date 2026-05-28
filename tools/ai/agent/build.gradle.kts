@@ -3,7 +3,7 @@ plugins {
 }
 
 description =
-    "kash `agent` — interactive LLM agent with shell tool access, backed by the JetBrains Koog framework and any OpenAI-compatible endpoint (LM Studio, Ollama, OpenRouter)."
+    "kash `agent` — interactive LLM agent with shell tool access, streaming directly against any OpenAI-compatible endpoint (LM Studio, Ollama, OpenRouter) via our own thin Ktor client."
 
 kotlin {
     sourceSets {
@@ -17,21 +17,25 @@ kotlin {
             // so read_file can tell an image from text/other-binary and route
             // images into the model's vision input.
             implementation(project(":shared:kmagic"))
-            // Used to probe `/v1/models` directly — Koog's strict deserializer
-            // rejects the LM Studio response (missing `created` field; see
-            // https://github.com/JetBrains/koog/issues/139). We parse it
-            // ourselves with a tolerant Json.
+            // For probing `/v1/models` (a simple JSON GET). Our OpenAI chat
+            // client uses Ktor directly (see jvmMain/wasmJsMain) because it
+            // needs streaming SSE consumption, which KashKtorClient buffers.
             implementation(project(":shared:net"))
-            // Koog — multiplatform agent framework (JVM, wasmJs, JS, iOS).
-            // Brings the OpenAI-compatible client (with custom baseUrl
-            // support for LM Studio / Ollama), tool registry, and the
-            // streaming event-handler feature used here for token-level
-            // rendering.
-            implementation(libs.koogAgents)
+            // Ktor — multiplatform HTTP client we drive directly to talk to
+            // OpenAI-compatible endpoints. The engine is platform-specific
+            // (CIO on JVM, JS on wasmJs), wired up in each platform's
+            // OpenAIChatClient.kt actual.
+            implementation(libs.ktorClientCore)
         }
         commonTest.dependencies {
             implementation(project(":coretest"))
             implementation(libs.kotlinxCoroutinesTest)
+        }
+        jvmMain.dependencies {
+            implementation(libs.ktorClientCio)
+        }
+        wasmJsMain.dependencies {
+            implementation(libs.ktorClientJs)
         }
     }
 }

@@ -8,10 +8,9 @@ package com.accucodeai.kash.tools.ai.agent
  * → defaults.
  *
  * @property baseUrl OpenAI-compatible HTTP origin — *no* trailing
- *   `/v1/chat/completions`. Koog's [ai.koog.prompt.executor.clients.openai
- *   .OpenAIClientSettings] appends `chatCompletionsPath` itself (default
- *   `v1/chat/completions`). We accept either form on the CLI and normalize
- *   in [parse].
+ *   `/v1/chat/completions`. Our chat client (see `openai/OpenAIChatClient.kt`)
+ *   appends the chat-completions path itself. We accept either form on the
+ *   CLI and normalize in [normalizeBaseUrl].
  * @property modelId the `model` field sent to the chat-completions endpoint.
  *   `null` means "ask the user" — [AgentSession] probes the server's
  *   `/v1/models` endpoint and shows an arrow-key picker. Explicit values
@@ -58,37 +57,41 @@ public data class AgentConfig(
      */
     val showThinking: Boolean = true,
     /**
-     * Carry reasoning back into history as a [ai.koog.prompt.message.MessagePart.Reasoning]
-     * part on the assistant turn, so the resent prefix matches what the
-     * server generated (prefix-cache hits on reasoning models). On by
-     * default; disable with `--no-reasoning-history` only for hosted APIs that
+     * Carry reasoning back into history as `reasoning_content` on the
+     * assistant turn, so the resent prefix matches what the server
+     * generated (prefix-cache hits on reasoning models). On by default;
+     * disable with `--no-reasoning-history` only for hosted APIs that
      * reject echoed reasoning. (DeepSeek is the *opposite* — it *requires*
-     * `reasoning_content` be passed back in thinking mode, see Koog #1599 /
-     * #1999 — so keep this on there.)
+     * `reasoning_content` be passed back in thinking mode, so keep it on
+     * there.)
      */
     val appendReasoning: Boolean = true,
     /**
-     * Opt into the OpenAI **Responses** API (streaming, stateless) instead of
-     * chat **completions**. Default OFF — both Koog 1.0 paths mishandle
-     * reasoning, but differently: completions silently *drops* it (its
-     * stream-delta model has no reasoning field), while Responses *crashes* on
-     * it (`OutputContent` is a sealed type with no `reasoning_text` variant, so
-     * the `response.content_part.added` reasoning event fails strict
-     * deserialization — and it's unshimmable: sealed type + private decode).
-     * Completions at least works for text + tools, so it's the safe default.
-     * `--responses` flips this on for when Koog fixes the Responses decoder.
-     */
-    val useResponsesApi: Boolean = false,
-    /**
-     * Parse inline `<think>…</think>` spans out of the streamed reply and treat
-     * the inside as reasoning (dimmed display via [showThinking], routed to
-     * history via [appendReasoning]). This is how reasoning surfaces on the
-     * chat-completions endpoint, where Koog drops the dedicated reasoning field
-     * — the model has to emit think-tags in its content (LM Studio: turn its
-     * reasoning *separation* off). A no-op when the content has no tags.
+     * Parse inline `<think>…</think>` spans out of the streamed reply and
+     * treat the inside as reasoning (dimmed display via [showThinking],
+     * routed to history via [appendReasoning]). Some models emit reasoning
+     * inside their content stream as `<think>` tags rather than out-of-band
+     * in the `reasoning_content` field; this normalizes the two paths.
      * Disable with `--no-think-tags` to pass content through verbatim.
      */
     val parseThinkTags: Boolean = true,
+    /**
+     * Drop user-typed input that arrives while the agent is streaming
+     * a response (regular character keys, arrows, etc.) so it doesn't
+     * auto-replay at the next prompt — the classic UNIX type-ahead
+     * problem, much worse here because a stray Enter would submit a
+     * half-typed message to the LLM. Interrupts (Ctrl-C / ESC),
+     * Ctrl-D, and out-of-band events (`Key.Paste`, `Key.PrintAbove`
+     * from drag-drop / accessibility hooks) are preserved either way.
+     *
+     * Default on for interactive use. Tests that drive a queue of
+     * inputs through a [FakeTerminalControl] (the existing
+     * `AgentLoopTest` pattern) should set this to false — under those
+     * tests "type-ahead" is the entire delivery mechanism for
+     * multi-turn input, and strict draining would swallow the second
+     * turn's text along with everything else.
+     */
+    val strictTurnTaking: Boolean = true,
 ) {
     public companion object {
         public const val DEFAULT_BASE_URL: String = "http://localhost:1234"
@@ -138,8 +141,8 @@ public data class AgentConfig(
          *   - `http://localhost:1234/v1`          — strip `/v1`
          *   - `http://localhost:1234/v1/`         — strip `/v1/`
          *   - `localhost:1234`                    — prepend `http://`
-         * The Koog client always appends `v1/chat/completions`, so we feed it
-         * the origin only.
+         * Our OpenAI chat client appends `v1/chat/completions`, so we feed
+         * it the origin only.
          */
         public fun normalizeBaseUrl(raw: String): String {
             val withScheme =

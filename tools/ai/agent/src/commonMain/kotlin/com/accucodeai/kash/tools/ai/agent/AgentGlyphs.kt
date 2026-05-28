@@ -1,25 +1,56 @@
 package com.accucodeai.kash.tools.ai.agent
 
 /**
- * Per-target glyph palette for the inline TUI. Dingbat codepoints (`✻`,
- * `❯`, `▸`, …) render beautifully in a real terminal emulator with a font
- * like Cascadia Code or JetBrains Mono, but a stock browser canvas font
- * shipped with `compose-for-web` tends to draw `.notdef` boxes for them.
+ * Glyph palette for the inline TUI. Dingbat codepoints (`✻`, `❯`, `▸`,
+ * …) and box-drawing characters render via the host terminal's font.
  *
- * Each target supplies a palette tuned to what its host font actually
- * has. JVM gets the dingbats; wasmJs falls back to safe ASCII so the
- * agent stays legible in the browser kash terminal.
+ * Both targets are now covered by the same palette:
+ *  - JVM ships into a real terminal emulator (iTerm2 / Terminal.app /
+ *    Alacritty / WezTerm / Windows Terminal) — any modern monospace
+ *    font carries these.
+ *  - wasmJs's browser terminal uses bundled JetBrains Mono (primary)
+ *    with Noto Sans Mono CJK SC preloaded as a glyph-fallback face.
+ *    JetBrains Mono carries every codepoint in this palette plus the
+ *    U+2500 box-drawing and U+2580 block-elements ranges; CJK falls
+ *    back to Noto. The historical ASCII fallback existed before any
+ *    font was bundled and is no longer needed.
  */
-internal expect val agentGlyphs: AgentGlyphs
+internal val agentGlyphs: AgentGlyphs =
+    AgentGlyphs(
+        userPrompt = "❯",
+        // ◆ (U+25C6 Black Diamond) — present in JetBrains Mono. The
+        // old ✻ (U+273B) tofu'd on the web build because the bundled
+        // font didn't carry it; the diamond reads as a distinct
+        // gutter mark without clashing with the ❯ user-prompt or
+        // ▸ picker arrow.
+        assistantGutter = "◆",
+        toolBullet = "·",
+        toolResultArrow = "→",
+        pickerArrow = "▸",
+        pickerCheck = "✓",
+        // Single-corner quadrant rotation. All four codepoints are
+        // in the U+2596..U+259F Block Elements range that JetBrains Mono
+        // carries with crisp pixel-aligned metrics. Reads as a
+        // clockwise dot orbit at the SPINNER_TICK_MS
+        // cadence (~600 ms full cycle). Replaces the old ✻ ✦ ✧ ✶ ✷ ✸ star
+        // set, of which only ✶ was actually carried by the bundled
+        // fonts — the rest tofu'd, which is why only one spinner
+        // frame ever showed up on the web build.
+        spinnerFrames = listOf("▖", "▘", "▝", "▗"),
+        codeBoxTopLeft = "╭",
+        codeBoxBottomLeft = "╰",
+        codeBoxHorizontal = "─",
+        codeBoxVertical = "│",
+    )
 
 internal data class AgentGlyphs(
-    /** Marker drawn at the left of the user's input line — e.g. `❯` / `>`. */
+    /** Marker drawn at the left of the user's input line — e.g. `❯`. */
     val userPrompt: String,
-    /** Gutter ahead of streamed assistant text — e.g. `✻` / `*`. */
+    /** Gutter ahead of streamed assistant text — e.g. `✻`. */
     val assistantGutter: String,
-    /** Bullet ahead of each tool-call indicator — e.g. `·` / `-`. */
+    /** Bullet ahead of each tool-call indicator — e.g. `·`. */
     val toolBullet: String,
-    /** Arrow ahead of the tool-result preview — e.g. `→` / `->`. */
+    /** Arrow ahead of the tool-result preview — e.g. `→`. */
     val toolResultArrow: String,
     /** Caret ahead of the currently-selected row in the model picker. */
     val pickerArrow: String,

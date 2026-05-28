@@ -444,6 +444,7 @@ public class AnsiInterpreter(
         val k = n.coerceAtMost(grid.cols - grid.cursorCol)
         for (c in grid.cursorCol until grid.cols - k) line[c] = line[c + k]
         for (c in grid.cols - k until grid.cols) line[c] = Cell.Blank
+        healWidePairs(line)
     }
 
     private fun insertChars(n: Int) {
@@ -451,12 +452,42 @@ public class AnsiInterpreter(
         val k = n.coerceAtMost(grid.cols - grid.cursorCol)
         for (c in (grid.cols - 1) downTo (grid.cursorCol + k)) line[c] = line[c - k]
         for (c in grid.cursorCol until grid.cursorCol + k) line[c] = Cell.Blank
+        healWidePairs(line)
     }
 
     private fun eraseChars(n: Int) {
         val line = grid.row(grid.cursorRow)
         val k = n.coerceAtMost(grid.cols - grid.cursorCol)
         for (c in grid.cursorCol until grid.cursorCol + k) line[c] = Cell.Blank
+        healWidePairs(line)
+    }
+
+    /**
+     * After a lateral shift / range-erase, walk the line and replace
+     * any stranded half of a wide pair with a plain space. A leader
+     * (width=2) is "stranded" if the cell to its right isn't its
+     * continuation. A continuation (width=0) is stranded if the cell
+     * to its left isn't its leader. Both halves of any surviving
+     * pair are left intact. O(cols) per call; only invoked from the
+     * three CSI ops that move cells laterally.
+     */
+    private fun healWidePairs(line: Array<Cell>) {
+        for (c in line.indices) {
+            when (line[c].width) {
+                2 -> {
+                    val next = c + 1
+                    if (next >= line.size || line[next].width != 0) {
+                        line[c] = Cell(' ', line[c].style)
+                    }
+                }
+
+                0 -> {
+                    if (c == 0 || line[c - 1].width != 2) {
+                        line[c] = Cell(' ', line[c].style)
+                    }
+                }
+            }
+        }
     }
 
     private fun nonZero(
