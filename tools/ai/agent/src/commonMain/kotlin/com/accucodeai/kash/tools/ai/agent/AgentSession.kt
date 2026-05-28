@@ -102,6 +102,15 @@ internal class AgentSession(
      */
     private var nudgesThisTurn = 0
 
+    /**
+     * How many assistant turns this user turn emitted a tool call whose
+     * arguments were malformed JSON. Bounds the self-correction re-ask loop
+     * ([MAX_MALFORMED_TOOL_CALLS_PER_TURN]): the model gets a precise error a
+     * few times to fix its call, then the turn ends rather than spinning to
+     * `maxAgentIterations`. Reset per user turn alongside [nudgesThisTurn].
+     */
+    private var malformedToolCallsThisTurn = 0
+
     private val llmClient: OpenAILLMClient =
         LenientOpenAILLMClient(
             apiKey = config.apiKey,
@@ -473,8 +482,10 @@ internal class AgentSession(
                     for (b in attachments.drainPendingExports()) {
                         shell.exportVar(b.name, b.path)
                     }
-                    // New user turn: reset the per-turn empty-reply nudge count.
+                    // New user turn: reset the per-turn empty-reply nudge count
+                    // and the malformed-tool-call re-ask counter.
                     nudgesThisTurn = 0
+                    malformedToolCallsThisTurn = 0
                     // Append the (possibly multimodal) user message to the
                     // agent's live prompt; the callLLM node then requests on it.
                     val parts = attachments.buildUserParts(text)
@@ -783,9 +794,40 @@ internal class AgentSession(
             cleanText = rawText
             parsedReasoning = null
         }
+        // Tool calls whose `arguments` didn't parse to a JSON object — the
+        // small-model failure mode (empty/truncated/mis-escaped args). We do
+        // NOT silently coerce them to `{}` (that reads to the model as "I sent
+        // valid empty args" and it loops); instead we preserve the raw text and
+        // surface a precise "malformed JSON" error it can self-correct from
+        // (see [markMalformedToolCallArgs] and KashAgentToolset's decodeArgs).
+        val malformed = toolCalls.filter { it.contentJsonResult.isFailure }
         val base =
             if (toolCalls.isNotEmpty()) {
-                frames.repairToolCallArgs().toMessageResponse()
+                // Bound it: a model that can't form a valid call after a few
+                // tries must not spin to maxAgentIterations. Once every call in
+                // the turn is malformed AND we're past the cap, drop the calls
+                // and end the turn with a plain-text explanation (routes to
+                // readInput) instead of re-asking forever.
+                if (malformed.isNotEmpty()) malformedToolCallsThisTurn++
+                val allMalformed = malformed.size == toolCalls.size
+                if (allMalformed && malformedToolCallsThisTurn > MAX_MALFORMED_TOOL_CALLS_PER_TURN) {
+                    val tool = toolCalls.first().name.ifEmpty { "the tool" }
+                    val giveUp =
+                        "I couldn't build a valid `$tool` call after several tries (the arguments kept " +
+                            "coming back as invalid JSON), so I've stopped to avoid looping. Try rephrasing, " +
+                            "or for a large file write it via shell_exec with a heredoc."
+                    // This message is fabricated after the streaming loop, so it
+                    // was never rendered — write it out so the user sees why the
+                    // turn ended (it routes to readInput as a normal text reply).
+                    out.writeUtf8("$giveUp\n")
+                    Message.Assistant(
+                        content = giveUp,
+                        metaInfo = ResponseMetaInfo.Empty,
+                        finishReason = "stop",
+                    )
+                } else {
+                    frames.markMalformedToolCallArgs().toMessageResponse()
+                }
             } else {
                 // Carry the model's real finish reason so isBlankReply can key
                 // off the documented "stop with empty content" signal. LM Studio
@@ -801,29 +843,35 @@ internal class AgentSession(
     }
 
     /**
-     * Default any malformed tool-call arguments to an empty object before Koog
-     * assembles the message.
+     * Re-wrap any malformed tool-call arguments in a sentinel object that
+     * **preserves the raw text the model emitted**, before Koog assembles the
+     * message.
      *
      * Koog 1.0's [toMessageResponse] does an UNGUARDED
      * `Json.parseToJsonElement(content).jsonObject` on every
      * [StreamFrame.ToolCallComplete] (see `StreamFrameExt`). Small local models
-     * (Gemma via LM Studio especially, often right after a tool returned binary
-     * garbage) routinely emit a tool call with an EMPTY — or otherwise
-     * non-object — `arguments` string. That parse then throws "unexpected end of
-     * the input at path: $", which propagates out of [streamAssistant], kills
-     * the whole agent subgraph, and aborts the HTTP stream (the "Client
-     * disconnected" LM Studio logs). Rewriting the offending frame's content to
-     * `{}` lets assembly succeed; the tool's own arg-decoding then fails
-     * *gracefully* as a recoverable tool-result Failure (caught by Koog's
-     * `GenericAgentEnvironment`), so the model gets an error it can retry from
-     * instead of the loop dying. Conservative: only frames whose content does
-     * not already parse to a JSON object are touched. Remove if Koog guards the
-     * parse upstream.
+     * routinely emit a tool call with an EMPTY / truncated / mis-escaped
+     * `arguments` string (worst on a large `content`); that parse throws
+     * "unexpected end of the input at path: $", which would propagate out of
+     * [streamAssistant], kill the agent subgraph, and abort the HTTP stream
+     * (the "Client disconnected" LM Studio logs).
+     *
+     * We previously defaulted such args to `{}` — but that's a known
+     * anti-pattern: the model is then told "fields missing" on what looks like
+     * a deliberate empty call and re-sends the same thing, burning iterations.
+     * Instead we stash the original string under [MALFORMED_ARGS_KEY] so it
+     * survives assembly as valid JSON, and KashAgentToolset's `decodeArgs`
+     * override turns it into a precise, recoverable error that echoes what the
+     * model actually sent ("your arguments were not valid JSON: …"). Only
+     * frames whose content doesn't already parse to a JSON object are touched.
      */
-    private fun List<StreamFrame>.repairToolCallArgs(): List<StreamFrame> =
+    private fun List<StreamFrame>.markMalformedToolCallArgs(): List<StreamFrame> =
         map { frame ->
             if (frame is StreamFrame.ToolCallComplete && frame.contentJsonResult.isFailure) {
-                frame.copy(content = "{}")
+                val raw = frame.content.take(MALFORMED_ARGS_ECHO_LIMIT)
+                // JsonObject.toString() emits valid, properly-escaped JSON.
+                val sentinel = JsonObject(mapOf(MALFORMED_ARGS_KEY to JsonPrimitive(raw))).toString()
+                frame.copy(content = sentinel)
             } else {
                 frame
             }
@@ -1171,6 +1219,15 @@ internal class AgentSession(
          * nudged indefinitely.
          */
         const val MAX_NUDGES_PER_TURN: Int = 16
+
+        /**
+         * How many malformed-argument tool calls we'll re-ask (with a precise
+         * error) in one user turn before giving up and ending the turn. Small
+         * enough that a stuck model doesn't burn the whole iteration budget,
+         * large enough that a capable model gets a couple of shots to fix its
+         * JSON.
+         */
+        const val MAX_MALFORMED_TOOL_CALLS_PER_TURN: Int = 3
 
         const val ESC = "\u001B"
         const val C_RESET = "$ESC[0m"

@@ -79,6 +79,19 @@ class AgentGraphLoopTest {
          * inside the sendToolResults node, killing the whole subgraph.
          */
         private val emptyArgsToolCall: Boolean = false,
+        /**
+         * Call 1 → a tool call with TRUNCATED/invalid-JSON arguments; call 2 →
+         * text. The follow-up records the tool-RESULT output fed back so the
+         * test can assert the model was told its args were malformed JSON (and
+         * shown the raw), not the silent `{}` / generic missing-fields.
+         */
+        private val malformedThenText: Boolean = false,
+        /**
+         * EVERY call emits a malformed (empty) tool call. The per-turn cap
+         * ([AgentSession.MAX_MALFORMED_TOOL_CALLS_PER_TURN]) must end the turn
+         * with a give-up message instead of re-asking to maxAgentIterations.
+         */
+        private val alwaysMalformed: Boolean = false,
         /** Always tool-then-blank: the nudge cap must stop it (no endless nudging). */
         private val relentlessBlank: Boolean = false,
         /**
@@ -110,6 +123,7 @@ class AgentGraphLoopTest {
         private val thinkInContent: Boolean = false,
     ) : PromptExecutor() {
         var streamCalls = 0
+        var malformedToolResultOutput: String? = null
         var sawToolResultBeforeReply = false
         var sawNudgeBeforeReply = false
         var nudgesInPrompt = 0
@@ -309,6 +323,36 @@ class AgentGraphLoopTest {
                             emitText("done")
                         }
                     }
+                    return@flow
+                }
+                if (malformedThenText) {
+                    if (streamCalls == 1) {
+                        // Truncated / invalid JSON — not parseable as an object.
+                        emit(
+                            StreamFrame.ToolCallComplete(
+                                "m1",
+                                "write_file",
+                                "{\"path\":\"x.sh\",\"content\":\"#!/bin/ba",
+                            ),
+                        )
+                        emit(StreamFrame.End(finishReason = "tool_calls", metaInfo = ResponseMetaInfo.Empty))
+                        return@flow
+                    }
+                    malformedToolResultOutput =
+                        prompt.messages
+                            .flatMap { it.parts }
+                            .filterIsInstance<MessagePart.Tool.Result>()
+                            .lastOrNull()
+                            ?.output
+                    emit(StreamFrame.TextDelta("done"))
+                    emit(StreamFrame.TextComplete("done"))
+                    emit(StreamFrame.End(finishReason = "stop", metaInfo = ResponseMetaInfo.Empty))
+                    return@flow
+                }
+                if (alwaysMalformed) {
+                    // Every assistant turn botches the args (empty string).
+                    emit(StreamFrame.ToolCallComplete("m$streamCalls", "write_file", ""))
+                    emit(StreamFrame.End(finishReason = "tool_calls", metaInfo = ResponseMetaInfo.Empty))
                     return@flow
                 }
                 if (emptyArgsToolCall) {
@@ -987,6 +1031,105 @@ class AgentGraphLoopTest {
                 "the Json parse crash must not surface · output=<<<$out>>>",
             )
             assertTrue("recovered" in out, "the follow-up reply still rendered · output=<<<$out>>>")
+        }
+
+    @Test
+    fun malformed_tool_args_are_reported_to_the_model_not_silently_emptied() =
+        runTest {
+            // A truncated/invalid-JSON tool call must come back to the model as
+            // a specific "your arguments were not valid JSON" error that echoes
+            // what it sent — NOT a silent `{}` (which reads as "I sent valid
+            // empty args" and makes it loop). Guards the anti-pattern.
+            val term = FakeTerminalControl()
+            term.pushChars("write a file")
+            term.pushKey(Key.Named.ENTER)
+            term.pushKey(Key.Ctrl('D'))
+
+            val captured = StringBuilder()
+            val sink =
+                object : SuspendSink {
+                    override suspend fun write(
+                        source: Buffer,
+                        byteCount: Long,
+                    ) {
+                        captured.append(source.readByteArray(byteCount.toInt()).decodeToString())
+                    }
+
+                    override suspend fun flush() {}
+
+                    override fun close() {}
+                }
+            val ctx = bareCommandContext(stdout = sink, stderr = sink)
+            val fake = FakeExecutor(malformedThenText = true)
+            val config =
+                AgentConfig(
+                    baseUrl = "http://localhost:1234",
+                    modelId = "fake-model",
+                    apiKey = "",
+                    systemPrompt = "test",
+                    temperature = 0.0,
+                    toolsEnabled = true,
+                )
+            val code = AgentSession(term, ctx, config, executorOverride = fake).run()
+            val out = captured.toString()
+            assertEquals(0, code, "loop survives the malformed-args tool call · output=<<<$out>>>")
+            val fed = fake.malformedToolResultOutput
+            assertTrue(fed != null, "a tool-result was fed back for the malformed call")
+            assertTrue(
+                "not valid JSON" in fed,
+                "the model is told its args were malformed JSON · fed=<<<$fed>>>",
+            )
+            // The raw the model actually sent is echoed so it can self-correct.
+            assertTrue("#!/bin/ba" in fed, "the raw malformed args are echoed back · fed=<<<$fed>>>")
+            assertTrue("done" in out, "the model self-corrected and finished · output=<<<$out>>>")
+        }
+
+    @Test
+    fun relentlessly_malformed_tool_calls_end_the_turn_at_the_cap() =
+        runTest {
+            // A model that can NEVER produce valid args must not re-ask forever:
+            // the per-turn cap ends the turn with a give-up message instead of
+            // spinning to maxAgentIterations.
+            val term = FakeTerminalControl()
+            term.pushChars("go")
+            term.pushKey(Key.Named.ENTER)
+            term.pushKey(Key.Ctrl('D'))
+
+            val captured = StringBuilder()
+            val sink =
+                object : SuspendSink {
+                    override suspend fun write(
+                        source: Buffer,
+                        byteCount: Long,
+                    ) {
+                        captured.append(source.readByteArray(byteCount.toInt()).decodeToString())
+                    }
+
+                    override suspend fun flush() {}
+
+                    override fun close() {}
+                }
+            val ctx = bareCommandContext(stdout = sink, stderr = sink)
+            val fake = FakeExecutor(alwaysMalformed = true)
+            val config =
+                AgentConfig(
+                    baseUrl = "http://localhost:1234",
+                    modelId = "fake-model",
+                    apiKey = "",
+                    systemPrompt = "test",
+                    temperature = 0.0,
+                    toolsEnabled = true,
+                )
+            val code = AgentSession(term, ctx, config, executorOverride = fake).run()
+            val out = captured.toString()
+            assertEquals(0, code, "turn ends cleanly at the cap · output=<<<$out>>>")
+            // ~ 1 (callLLM) + cap (sendToolResults re-asks) + 1 (give-up) calls;
+            // bounded well under maxAgentIterations.
+            assertTrue(fake.streamCalls in 4..6, "bounded by the malformed cap · calls=${fake.streamCalls}")
+            assertTrue(
+                "couldn't build a valid" in out,
+                "the give-up message is shown · output=<<<$out>>>",
+            )
         }
 
     @Test

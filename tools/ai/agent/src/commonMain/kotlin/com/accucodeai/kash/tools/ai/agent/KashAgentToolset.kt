@@ -3,6 +3,9 @@ package com.accucodeai.kash.tools.ai.agent
 import ai.koog.agents.core.tools.SimpleTool
 import ai.koog.agents.core.tools.ToolRegistry
 import ai.koog.agents.core.tools.annotations.LLMDescription
+import ai.koog.serialization.JSONObject
+import ai.koog.serialization.JSONPrimitive
+import ai.koog.serialization.JSONSerializer
 import ai.koog.serialization.typeToken
 import com.accucodeai.kash.api.CommandContext
 import com.accucodeai.kash.api.io.SuspendSink
@@ -11,6 +14,41 @@ import com.accucodeai.kash.magic.KMagic
 import kotlinx.io.Buffer
 import kotlinx.io.readByteArray
 import kotlinx.serialization.Serializable
+
+/**
+ * Key under which [AgentSession.markMalformedToolCallArgs] stashes the raw,
+ * unparseable arguments string a model emitted, so it survives Koog's message
+ * assembly as valid JSON. The tools' [SimpleTool.decodeArgs] overrides detect
+ * it and raise a precise, recoverable "your arguments were not valid JSON"
+ * error (echoing what the model sent) instead of the generic
+ * missing-fields/`{}` confusion. See [rejectIfMalformedArgs].
+ */
+internal const val MALFORMED_ARGS_KEY = "__kash_malformed_args__"
+
+/** Cap on how much of the raw malformed args we echo back (per side). */
+internal const val MALFORMED_ARGS_ECHO_LIMIT = 400
+
+/**
+ * If [rawArgs] is the malformed-args sentinel, throw a recoverable error that
+ * tells the model exactly what went wrong and how to fix it — the surfaced
+ * tool result becomes "Tool with name '<name>' failed to parse arguments due
+ * to the error: <this message>". No-op for genuine arguments. [schemaHint] is
+ * a one-line example of the valid shape; [extra] appends tool-specific advice.
+ */
+private fun rejectIfMalformedArgs(
+    rawArgs: JSONObject,
+    toolName: String,
+    schemaHint: String,
+    extra: String = "",
+) {
+    val raw = (rawArgs.entries[MALFORMED_ARGS_KEY] as? JSONPrimitive)?.contentOrNull ?: return
+    val shown = if (raw.isBlank()) "(empty — no arguments were sent)" else "`$raw`"
+    throw IllegalArgumentException(
+        "the arguments you sent were not valid JSON, so $toolName did NOT run and nothing changed. " +
+            "You sent: $shown. Resend the call once as a single valid JSON object, e.g. $schemaHint." +
+            (if (extra.isEmpty()) "" else " $extra"),
+    )
+}
 
 /**
  * An image `read_file` recognized, queued for injection into the model's
@@ -75,6 +113,14 @@ internal class KashAgentToolset(
                     "stdout+stderr followed by an `exit: N` line. State (cwd, env, functions, " +
                     "aliases) carries across calls within this session.",
         ) {
+        override fun decodeArgs(
+            rawArgs: JSONObject,
+            serializer: JSONSerializer,
+        ): ShellArgs {
+            rejectIfMalformedArgs(rawArgs, name, """{"command":"ls -la"}""")
+            return super.decodeArgs(rawArgs, serializer)
+        }
+
         override suspend fun execute(args: ShellArgs): String {
             val r = shell.execute(args.command)
             val sb = StringBuilder()
@@ -104,6 +150,14 @@ internal class KashAgentToolset(
                     "content. Image files (PNG, JPEG, GIF, WebP, …) are shown to you directly as a " +
                     "picture on the next step — read_file an image when you need to see it.",
         ) {
+        override fun decodeArgs(
+            rawArgs: JSONObject,
+            serializer: JSONSerializer,
+        ): PathArgs {
+            rejectIfMalformedArgs(rawArgs, name, """{"path":"src/main.kt"}""")
+            return super.decodeArgs(rawArgs, serializer)
+        }
+
         override suspend fun execute(args: PathArgs): String {
             val resolved = resolve(args.path)
             val fs = ctx.fs
@@ -145,6 +199,21 @@ internal class KashAgentToolset(
             name = "write_file",
             description = "Write a UTF-8 text file. Overwrites if it exists.",
         ) {
+        override fun decodeArgs(
+            rawArgs: JSONObject,
+            serializer: JSONSerializer,
+        ): WriteArgs {
+            rejectIfMalformedArgs(
+                rawArgs,
+                name,
+                """{"path":"foo.sh","content":"#!/bin/bash\n…"}""",
+                extra =
+                    "If the content is large or hard to encode as one JSON string, write it via shell_exec " +
+                        "with a heredoc instead: cat > foo.sh <<'EOF' … EOF.",
+            )
+            return super.decodeArgs(rawArgs, serializer)
+        }
+
         override suspend fun execute(args: WriteArgs): String {
             val resolved = resolve(args.path)
             // Capture prior content (null when creating) so we can render a
