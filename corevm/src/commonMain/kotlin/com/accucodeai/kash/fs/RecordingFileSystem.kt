@@ -7,6 +7,7 @@ import com.accucodeai.kash.api.OpenFileDescription
 import com.accucodeai.kash.api.io.SuspendSink
 import com.accucodeai.kash.api.io.SuspendSource
 import kotlinx.coroutines.flow.Flow
+import kotlinx.io.Buffer
 
 /**
  * Per-process [FileSystem] decorator that records data reads and mutations
@@ -57,6 +58,7 @@ internal class RecordingFileSystem(
     private fun record(
         path: String,
         kind: AccessKind,
+        before: ByteArray? = null,
     ) {
         if (!bus.hasListeners) return // no subscribers → skip label lookup + allocation
         val label = labelOf(path)
@@ -68,8 +70,35 @@ internal class RecordingFileSystem(
                 label = label,
                 pid = opener.pid,
                 scopeId = opener.traceScopeId ?: 0L,
+                before = before,
             ),
         )
+    }
+
+    /**
+     * Snapshot a file's content immediately before it's overwritten, so the
+     * emitted [FileAccess] can carry [FileAccess.before] for a diff. Returns
+     * null unless a capturing observer is attached *and* this is an in-place
+     * overwrite (`kind == WRITE`) of a path we'd actually record — a CREATE
+     * has no prior content, and an unrecorded mount shouldn't pay the read.
+     *
+     * Two budgets keep capture from pinning unbounded memory: the file is
+     * skipped if it exceeds [FileAccessBus.MAX_CAPTURE_FILE_BYTES] (checked
+     * via a cheap, unrecorded `stat` before any read), and only the first
+     * [FileAccessBus.MAX_CAPTURE_FILES] files of a capture session snapshot at
+     * all. A skip yields null — the consumer degrades to a note, not a diff.
+     * Best-effort: a read failure also yields null rather than aborting.
+     */
+    private suspend fun captureBefore(
+        path: String,
+        kind: AccessKind,
+    ): ByteArray? {
+        if (!bus.captureContent || kind != AccessKind.WRITE) return null
+        if (!shouldRecord(labelOf(path), kind)) return null
+        val size = runCatching { delegate.stat(path, opener).size }.getOrNull()
+        if (size != null && size > FileAccessBus.MAX_CAPTURE_FILE_BYTES) return null
+        if (!bus.tryReserveCaptureSlot()) return null
+        return runCatching { delegate.readBytes(path, opener) }.getOrNull()
     }
 
     /**
@@ -119,7 +148,15 @@ internal class RecordingFileSystem(
     ): SuspendSink {
         if (!bus.hasListeners) return delegate.sink(path, append, mode, opener ?: this.opener)
         val kind = writeKind(path)
-        return delegate.sink(path, append, mode, opener ?: this.opener).also { record(path, kind) }
+        val op = opener ?: this.opener
+        if (bus.captureContent && kind == AccessKind.WRITE) {
+            // Truncation happens at delegate-open, so we can't read "before"
+            // up front (sink() is non-suspend; readBytes is suspend). Defer
+            // the delegate open to the first *suspend* sink op, where we read
+            // the prior content first. See [CaptureSink].
+            return CaptureSink(path, append, mode, op, kind)
+        }
+        return delegate.sink(path, append, mode, op).also { record(path, kind) }
     }
 
     override fun sinkNoFollow(
@@ -134,7 +171,11 @@ internal class RecordingFileSystem(
     ): SuspendSink {
         if (!bus.hasListeners) return delegate.sinkNoFollow(path, append, opener ?: this.opener)
         val kind = writeKind(path)
-        return delegate.sinkNoFollow(path, append, opener ?: this.opener).also { record(path, kind) }
+        val op = opener ?: this.opener
+        if (bus.captureContent && kind == AccessKind.WRITE) {
+            return CaptureSink(path, append, mode = -1, opener = op, kind = kind, noFollow = true)
+        }
+        return delegate.sinkNoFollow(path, append, op).also { record(path, kind) }
     }
 
     override suspend fun writeBytes(
@@ -144,8 +185,9 @@ internal class RecordingFileSystem(
     ) {
         if (!bus.hasListeners) return delegate.writeBytes(path, bytes, mode)
         val kind = writeKind(path)
+        val before = captureBefore(path, kind)
         delegate.writeBytes(path, bytes, mode)
-        record(path, kind)
+        record(path, kind, before)
     }
 
     override suspend fun appendBytes(
@@ -154,8 +196,74 @@ internal class RecordingFileSystem(
     ) {
         if (!bus.hasListeners) return delegate.appendBytes(path, bytes)
         val kind = writeKind(path)
+        // For an append, "before" is the content the appended bytes extend —
+        // capturing it lets a consumer show the appended lines as a diff.
+        val before = captureBefore(path, kind)
         delegate.appendBytes(path, bytes)
-        record(path, kind)
+        record(path, kind, before)
+    }
+
+    /**
+     * Content-capturing sink used only when a capturing observer is attached
+     * and the target already exists (an in-place overwrite). The delegate
+     * sink — which truncates the file on open — is opened lazily on the first
+     * *suspend* operation (`write`/`flush`), where we can first read the prior
+     * content for [FileAccess.before]. The non-suspend [close] can't read, so
+     * a sink that's opened and closed with no write (e.g. `: > file`) still
+     * truncates but records `before = null`.
+     */
+    private inner class CaptureSink(
+        private val path: String,
+        private val append: Boolean,
+        private val mode: Int,
+        private val opener: KashProcess,
+        private val kind: AccessKind,
+        private val noFollow: Boolean = false,
+    ) : SuspendSink {
+        private var inner: SuspendSink? = null
+        private var opened = false
+
+        private fun openDelegate(): SuspendSink =
+            if (noFollow) delegate.sinkNoFollow(path, append, opener) else delegate.sink(path, append, mode, opener)
+
+        private suspend fun ensureOpenSuspending(): SuspendSink {
+            inner?.let { return it }
+            // Read prior content BEFORE the delegate truncates on open — via
+            // captureBefore so the size / file-count budgets apply here too.
+            val before = captureBefore(path, kind)
+            val s = openDelegate()
+            inner = s
+            opened = true
+            record(path, kind, before)
+            return s
+        }
+
+        override suspend fun write(
+            source: Buffer,
+            byteCount: Long,
+        ) {
+            ensureOpenSuspending().write(source, byteCount)
+        }
+
+        override suspend fun flush() {
+            ensureOpenSuspending().flush()
+        }
+
+        override fun close() {
+            val open = inner
+            if (open != null) {
+                open.close()
+                return
+            }
+            // Never written to: still honor the open's side effect (truncate
+            // an existing file) by opening + closing the delegate. close() is
+            // non-suspend, so we can't read "before" here — record null.
+            if (!opened) {
+                opened = true
+                openDelegate().close()
+                record(path, kind, before = null)
+            }
+        }
     }
 
     override fun mkdirs(

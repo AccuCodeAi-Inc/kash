@@ -1,6 +1,8 @@
 package com.accucodeai.kash.tools.ai.agent
 
 import com.accucodeai.kash.api.CommandContext
+import com.accucodeai.kash.fs.FileAccess
+import com.accucodeai.kash.fs.traced
 import com.accucodeai.kash.interpreter.Interpreter
 import com.accucodeai.kash.parser.ParseException
 import com.accucodeai.kash.parser.Parser
@@ -32,11 +34,25 @@ internal class KashAgentShell(
 ) {
     private var interp: Interpreter? = null
 
+    /**
+     * Trace scope assigned to the agent's forked process (and inherited by
+     * its child-process subtree). Lets [execute] filter the machine-wide
+     * file-access stream down to *this* shell's touches. Set in
+     * [ensureInterpreter]; 0 until then.
+     */
+    private var traceScope: Long = 0L
+
     /** Result of one tool-call execution. */
     data class Result(
         val stdout: String,
         val stderr: String,
         val exitCode: Int,
+        /**
+         * Files this command read or mutated, scoped to the agent shell.
+         * Mutations carry [FileAccess.before] content so a caller can render
+         * a before→after diff (capture is enabled for the agent shell).
+         */
+        val touched: List<FileAccess> = emptyList(),
     )
 
     /**
@@ -53,8 +69,16 @@ internal class KashAgentShell(
             } catch (e: ParseException) {
                 return Result("", "kash: parse error: ${e.message}\n", 2)
             }
-        val (stdout, stderr, code) = interp.run(parsed, ByteArray(0), mergeStderr = false)
-        return Result(stdout, stderr, code)
+        // Trace + capture before-content over the machine-wide bus, then keep
+        // only this shell's subtree (other sessions may share the machine).
+        // Same plumbing the embedding facade uses for `ExecResult.touched`.
+        val traced =
+            parentCtx.process.machine.fileAccess.traced(captureContent = true) {
+                interp.run(parsed, ByteArray(0), mergeStderr = false)
+            }
+        val (stdout, stderr, code) = traced.value
+        val touched = traced.touched.filter { it.scopeId == traceScope }
+        return Result(stdout, stderr, code, touched)
     }
 
     /**
@@ -92,6 +116,11 @@ internal class KashAgentShell(
         // process table.
         val agentProc = parentCtx.process.fork()
         agentProc.commandName = "kash-agent-shell"
+        // Tag this process (and its fork subtree) with a unique trace scope so
+        // [execute] can filter the machine-wide access stream to our own
+        // touches. The pid is unique per process, so it doubles as the scope.
+        traceScope = agentProc.pid.toLong()
+        agentProc.traceScopeId = traceScope
         val fresh =
             Interpreter(
                 machine = parentCtx.process.machine,

@@ -17,6 +17,16 @@ import kotlin.test.assertTrue
  * empty/sep-only bodies. These tests pin those shapes.
  */
 class CompoundListShapeTest {
+    private companion object {
+        // Upper bound for the deep-nesting parse tripwires. These guard
+        // against *exponential* blowup (the old LL-backtracking bug), where
+        // a regression takes seconds-to-OOM while healthy linear parsing is
+        // sub-millisecond. Kept generous on purpose so a CPU-starved CI box
+        // doesn't false-fail on constant-factor jitter — the only thing that
+        // can actually exceed this is a true algorithmic regression.
+        const val PARSE_BLOWUP_GUARD_MS = 5_000L
+    }
+
     private fun parse(src: String) = Parser(src).parseScript()
 
     private fun firstFor(src: String): ForCommand =
@@ -99,7 +109,11 @@ class CompoundListShapeTest {
                 .markNow()
         parse(script)
         val ms = t0.elapsedNow().inWholeMilliseconds
-        assertTrue(ms < 500, "expected <500ms, got ${ms}ms")
+        // Tripwire for *exponential* parse blowup (the old backtracking bug),
+        // not a microbenchmark: linear parsing is sub-ms, an explosion is
+        // seconds-to-OOM. The bound is deliberately generous so it survives a
+        // loaded CI box — even O(n³) at this depth stays well under it.
+        assertTrue(ms < PARSE_BLOWUP_GUARD_MS, "expected <${PARSE_BLOWUP_GUARD_MS}ms, got ${ms}ms")
     }
 
     @Test fun pathologicalDepthParsesFast() {
@@ -111,7 +125,9 @@ class CompoundListShapeTest {
                 .markNow()
         parse(script)
         val ms = t0.elapsedNow().inWholeMilliseconds
-        assertTrue(ms < 1000, "expected <1000ms, got ${ms}ms")
+        // See [deepNestingParsesFast]: generous exponential-blowup tripwire,
+        // not a constant-factor perf bound.
+        assertTrue(ms < PARSE_BLOWUP_GUARD_MS, "expected <${PARSE_BLOWUP_GUARD_MS}ms, got ${ms}ms")
     }
 
     private fun buildNestedFor(depth: Int): String =

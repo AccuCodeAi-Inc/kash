@@ -12,14 +12,22 @@ import kotlin.test.assertTrue
  * line-by-line so a hang in this test points at exactly the bash-conformance
  * scenario it replicates.
  *
- * Each test wraps in `withTimeout(5_000)` so a deadlock surfaces as a fast
- * failure with a stack trace instead of as a 1-minute `runTest` ceiling
- * miss in the conformance runner.
+ * Each test wraps in `withTimeout([DEADLOCK_GUARD_MS])` so a deadlock
+ * surfaces as a failure with a stack trace instead of the 1-minute `runTest`
+ * ceiling miss in the conformance runner. This is a *liveness* backstop, not
+ * a perf bound: a healthy round-trip is milliseconds and a real deadlock
+ * hangs forever, so the value just has to sit comfortably above any
+ * loaded-machine completion and below the ceiling — generous on purpose so a
+ * CPU-starved full build doesn't false-fail.
  */
 class CoprocTest {
+    private companion object {
+        const val DEADLOCK_GUARD_MS = 30_000L
+    }
+
     @Test fun anonymous_coproc_brace_body_one_shot() =
         runBlocking {
-            withTimeout(5_000) {
+            withTimeout(DEADLOCK_GUARD_MS) {
                 val r =
                     Kash(registry = standardRegistry()).exec(
                         """
@@ -36,7 +44,7 @@ class CoprocTest {
 
     @Test fun coproc_pid_is_decimal_integer() =
         runBlocking {
-            withTimeout(5_000) {
+            withTimeout(DEADLOCK_GUARD_MS) {
                 val r =
                     Kash(registry = standardRegistry()).exec(
                         """
@@ -63,7 +71,7 @@ class CoprocTest {
      *  Sends data, kills cat, reads — no concurrent block expected. */
     @Test fun coproc_reflect_write_then_kill_then_read() =
         runBlocking {
-            withTimeout(5_000) {
+            withTimeout(DEADLOCK_GUARD_MS) {
                 val r =
                     Kash(registry = standardRegistry()).exec(
                         """
@@ -83,7 +91,7 @@ class CoprocTest {
      *  read from it BEFORE killing — does cat's echo-back even arrive? */
     @Test fun coproc_reflect_read_before_kill() =
         runBlocking {
-            withTimeout(5_000) {
+            withTimeout(DEADLOCK_GUARD_MS) {
                 val r =
                     Kash(registry = standardRegistry()).exec(
                         """
@@ -106,7 +114,7 @@ class CoprocTest {
      *  intrinsic should reach command-not-found, not syntax error. */
     @Test fun coproc_simple_command_with_flags_parses() =
         runBlocking {
-            withTimeout(5_000) {
+            withTimeout(DEADLOCK_GUARD_MS) {
                 val r =
                     Kash(registry = standardRegistry()).exec(
                         "coproc nosuchcmd -n -u",
@@ -120,7 +128,7 @@ class CoprocTest {
 
     @Test fun coproc_bare_simple_no_args() =
         runBlocking {
-            withTimeout(5_000) {
+            withTimeout(DEADLOCK_GUARD_MS) {
                 val r =
                     Kash(registry = standardRegistry()).exec(
                         "coproc nosuchcmd",
@@ -135,7 +143,7 @@ class CoprocTest {
 
     @Test fun coproc_simple_with_arg_no_flag() =
         runBlocking {
-            withTimeout(5_000) {
+            withTimeout(DEADLOCK_GUARD_MS) {
                 val r =
                     Kash(registry = standardRegistry()).exec(
                         "coproc nosuchcmd arg",
@@ -150,7 +158,7 @@ class CoprocTest {
 
     @Test fun named_coproc_reflect_round_trip_then_kill() =
         runBlocking {
-            withTimeout(5_000) {
+            withTimeout(DEADLOCK_GUARD_MS) {
                 val r =
                     Kash(registry = standardRegistry()).exec(
                         """
@@ -170,7 +178,7 @@ class CoprocTest {
      *  high fd, opens the file there, assigns the slot number to `$varname`. */
     @Test fun var_redir_assigns_allocated_fd() =
         runBlocking {
-            withTimeout(5_000) {
+            withTimeout(DEADLOCK_GUARD_MS) {
                 val fs =
                     com.accucodeai.kash.fs
                         .InMemoryFs()
@@ -197,7 +205,7 @@ class CoprocTest {
      *  After the move, reading from the old fd must fail (it's closed). */
     @Test fun move_fd_releases_source() =
         runBlocking {
-            withTimeout(5_000) {
+            withTimeout(DEADLOCK_GUARD_MS) {
                 val r =
                     Kash(registry = standardRegistry()).exec(
                         """

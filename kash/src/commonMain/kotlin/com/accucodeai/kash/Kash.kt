@@ -18,10 +18,10 @@ import com.accucodeai.kash.api.terminal.ControllingTty
 import com.accucodeai.kash.api.terminal.TerminalControl
 import com.accucodeai.kash.api.user.UserDatabase
 import com.accucodeai.kash.api.util.bufferOf
-import com.accucodeai.kash.fs.FileAccess
 import com.accucodeai.kash.fs.FileSystem
 import com.accucodeai.kash.fs.InMemoryFs
 import com.accucodeai.kash.fs.installSystemBin
+import com.accucodeai.kash.fs.traced
 import com.accucodeai.kash.interpreter.Interpreter
 import com.accucodeai.kash.snapshot.InterpreterSnapshot
 import com.accucodeai.kash.tools.ext.extCommands
@@ -29,7 +29,6 @@ import com.accucodeai.kash.tools.forensics.forensicsCommands
 import com.accucodeai.kash.tools.kash.all.kashCommands
 import com.accucodeai.kash.tools.posix.posixCommands
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.channels.Channel
 import kotlinx.io.Buffer
 import kotlinx.io.readString
 import kotlin.coroutines.CoroutineContext
@@ -459,21 +458,11 @@ public class Kash(
                 options.scriptName == "kash" || options.scriptName == "bash"
             val out = Buffer()
             val err = if (options.mergeStderr) out else Buffer()
-            // File-access capture (opt-in). A synchronous observer on the
-            // bus funnels every recorded touch into an unbounded channel —
-            // emit() calls it inline, so by the time runStreaming returns
-            // the channel holds the complete set (no async drain). When off,
-            // nothing is registered and the recording layer allocates nothing.
-            val traceChannel: Channel<FileAccess>? =
-                if (options.traceAccess) Channel(Channel.UNLIMITED) else null
-            val traceObserver: ((FileAccess) -> Unit)? =
-                traceChannel?.let { ch -> { ch.trySend(it) } }
-            traceObserver?.let { machine.fileAccess.addObserver(it) }
             // Parse warnings are no longer collected up-front — each
             // StatementStream.next() returns its own warnings on first
             // yield, and the source-driven runStreaming loop attributes
             // them to the upcoming statement via flushLexWarningsBefore.
-            val code =
+            val runBody: suspend () -> Int = {
                 try {
                     interpreter.runStreaming(
                         source = statementSource,
@@ -492,10 +481,19 @@ public class Kash(
                     interpreter.cwd = savedCwd
                     interpreter.currentOuterScript = savedOuterScript
                     interpreter.currentOuterIsCLine = savedOuterIsCLine
-                    traceObserver?.let { machine.fileAccess.removeObserver(it) }
-                    traceChannel?.close()
                 }
-            val touched = traceChannel?.let { drainTouched(it) } ?: emptyList()
+            }
+            // File-access capture is opt-in: when off, no observer is attached
+            // and the recording layer allocates nothing. The trace plumbing
+            // (observer → channel → drain) is shared with the agent shell via
+            // [FileAccessBus.traced].
+            val (code, touched) =
+                if (options.traceAccess) {
+                    val r = machine.fileAccess.traced(body = runBody)
+                    r.value to r.touched
+                } else {
+                    runBody() to emptyList()
+                }
             return ExecResult(out.readString(), err.readString(), code, touched)
         }
 
@@ -734,18 +732,4 @@ public fun defaultEnvFor(userDb: UserDatabase): Map<String, String> {
         // POSIX getopts: OPTIND starts at 1 in every new shell.
         "OPTIND" to "1",
     )
-}
-
-/**
- * Drain a closed, buffered [Channel] of [FileAccess] into a list. The
- * observer fed it synchronously during the exec, so after close every
- * event is already buffered — `tryReceive` empties it without suspending.
- */
-private fun drainTouched(channel: Channel<FileAccess>): List<FileAccess> {
-    val touched = ArrayList<FileAccess>()
-    while (true) {
-        val r = channel.tryReceive()
-        if (r.isSuccess) touched.add(r.getOrThrow()) else break
-    }
-    return touched
 }
