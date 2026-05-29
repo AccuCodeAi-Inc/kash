@@ -3,7 +3,10 @@ package com.accucodeai.kash.tools.jq
 import com.accucodeai.kash.json.JsonValue
 import com.accucodeai.kash.json.KashJson
 import com.accucodeai.kash.json.asStringOrNull
+import com.accucodeai.kash.json.jsonArray
+import com.accucodeai.kash.json.jsonNull
 import com.accucodeai.kash.tools.jq.ast.JqExpr
+import com.accucodeai.kash.tools.jq.eval.InputSource
 import com.accucodeai.kash.tools.jq.eval.JqContext
 import com.accucodeai.kash.tools.jq.eval.eval
 import com.accucodeai.kash.tools.jq.parser.parseJqProgram
@@ -41,12 +44,13 @@ public object Jq {
         v: JsonValue,
         raw: Boolean = false,
         pretty: Boolean = false,
+        indent: String = "  ",
     ): String {
         if (raw) {
             val s = v.asStringOrNull()
             if (s != null) return s
         }
-        return KashJson.encode(v, pretty = pretty)
+        return KashJson.encode(v, pretty = pretty, indent = indent)
     }
 }
 
@@ -60,4 +64,44 @@ public class JqProgram internal constructor(
         val ctx = JqContext(vars = opts.args)
         return ast.eval(ctx, input)
     }
+
+    /**
+     * Run the program over a stream of [values] with a shared input cursor, so
+     * `input` / `inputs` consume from the same stream the main loop draws from.
+     *
+     * - [nullInput] (`-n`): evaluate once against `null`; the main loop reads
+     *   nothing, but [values] remain available to `input` / `inputs`.
+     * - [slurp] (`-s`): evaluate once against an array of *all* [values]
+     *   (which therefore drains the stream; `inputs` then yields nothing).
+     * - otherwise: evaluate once per value pulled from the stream, with
+     *   `input` / `inputs` pulling subsequent values from the same cursor.
+     */
+    public fun applyAll(
+        values: List<JsonValue>,
+        opts: JqOptions = JqOptions(),
+        nullInput: Boolean = false,
+        slurp: Boolean = false,
+    ): Sequence<JsonValue> =
+        sequence {
+            val source = InputSource(values.iterator())
+            val ctx = JqContext(vars = opts.args, inputs = source)
+            when {
+                nullInput -> {
+                    yieldAll(ast.eval(ctx, jsonNull()))
+                }
+
+                slurp -> {
+                    val all = ArrayList<JsonValue>()
+                    while (true) all.add(source.nextOrNull() ?: break)
+                    yieldAll(ast.eval(ctx, jsonArray(all)))
+                }
+
+                else -> {
+                    while (true) {
+                        val next = source.nextOrNull() ?: break
+                        yieldAll(ast.eval(ctx, next))
+                    }
+                }
+            }
+        }
 }

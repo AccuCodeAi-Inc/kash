@@ -18,5 +18,9 @@ kotlin {
             implementation(project(":shared:regex"))
             implementation(libs.kotlinxSerializationJson)
         }
+        commonTest.dependencies {
+            implementation(project(":coretest"))
+            implementation(libs.kotlinxCoroutinesTest)
+        }
     }
 }

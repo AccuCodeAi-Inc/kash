@@ -13,6 +13,13 @@ import com.accucodeai.kash.tools.jq.ast.JqParam
 internal data class JqContext(
     val vars: Map<String, JsonValue> = emptyMap(),
     val funcs: Map<String, FunctionSlot> = emptyMap(),
+    /**
+     * Shared cursor backing `input` / `inputs`. Carried unchanged across
+     * [withVar] / [withFunc] `copy()`s, so every derived context pulls from
+     * the same stream position. Defaults to an empty source — a single-input
+     * `apply` then makes `input` raise "No more inputs" and `inputs` empty.
+     */
+    val inputs: InputSource = InputSource.EMPTY,
 ) {
     fun withVar(
         name: String,

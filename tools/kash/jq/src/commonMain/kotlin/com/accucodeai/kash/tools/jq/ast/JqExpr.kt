@@ -153,6 +153,16 @@ internal data class ErrorExpr(
 ) : JqExpr
 
 /**
+ * A `@name` format/encoding applied as a filter to the input (e.g. `@base64`,
+ * `@csv`). [name] excludes the leading `@`. The `@fmt "interp"` form (format
+ * applied to a string's interpolations) is not modeled — the grammar only
+ * admits a bare `@name`.
+ */
+internal data class FormatStr(
+    val name: String,
+) : JqExpr
+
+/**
  * `path = value` — for each path produced by [path], for each value produced
  * by [value], emit the input with that path set to that value.
  */

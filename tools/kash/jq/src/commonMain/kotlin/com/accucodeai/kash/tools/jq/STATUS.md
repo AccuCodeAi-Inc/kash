@@ -73,46 +73,86 @@ JSON is `com.accucodeai.kash.json.JsonValue` (alias of kotlinx-serialization's
 - Replacement is a jq filter; named captures bind as `$name`
 - Flags: `i`, `m`, `s`, `g`, `n` (no-op), `x` (rejected — RE2 lacks support)
 
-### Builtins (≈ 60)
+### Builtins (≈ 85)
 **Inspection**: `length`, `utf8bytelength`, `keys`, `keys_unsorted`, `values`,
-`type`, `has`, `in`, `contains`, `paths`, `leaf_paths`
+`type`, `has`, `in`, `contains`, `inside`, `paths`, `leaf_paths`
+
+**Inputs**: `input` (next value from the shared input stream, errors when
+exhausted), `inputs` (stream all remaining). Backed by a per-run [InputSource]
+cursor shared between the top-level driver and these builtins — see
+`Jq.applyAll` and `eval/InputSource.kt`.
+
+**Type filters** (each `select(type == X)`): `arrays`, `objects`,
+`iterables` (array+object), `booleans`, `numbers`, `strings`, `nulls`,
+`scalars` (everything that isn't array/object)
 
 **Collections**: `to_entries`, `from_entries`, `with_entries`, `map`,
 `map_values`, `select`, `add`, `any`, `all`, `reverse`, `sort`, `sort_by`,
 `group_by`, `unique`, `unique_by`, `min`, `max`, `min_by`, `max_by`,
-`range/1`, `range/2`, `range/3`, `first/0`, `first/1`, `last/0`, `last/1`,
-`nth(n; f)`, `limit(n; f)`, `walk(f)`, `recurse/0`, `recurse_down/0`,
-`recurse(f)`, `until(cond; upd)`, `while(cond; upd)`
+`flatten`, `flatten(depth)`, `toarray`, `transpose`, `range/1`, `range/2`,
+`range/3`, `first/0`, `first/1`, `last/0`, `last/1`, `nth(n; f)`,
+`limit(n; f)`, `walk(f)`, `recurse/0`, `recurse_down/0`, `recurse(f)`,
+`until(cond; upd)`, `while(cond; upd)`
+
+**Indexing**: `index(s)`, `rindex(s)`, `indices(s)` — for strings
+(substring positions) and arrays (element index, or subsequence positions
+when the needle is an array)
 
 **Strings**: `tostring`, `tonumber`, `tojson`, `fromjson`, `ascii_downcase`,
-`ascii_upcase`, `startswith`, `endswith`, `ltrimstr`, `rtrimstr`, `split`,
-`join`, `explode`-via-builtins (no), `not`, `empty`
+`ascii_upcase`, `startswith`, `endswith`, `ltrimstr`, `rtrimstr`,
+`trimstr(s)` (strips matching prefix AND suffix, jq 1.7+), `split` (1-arg
+literal; 2-arg `split(re; flags)` regex), `splits(re)` / `splits(re; flags)`
+(regex stream split), `join`, `explode`, `implode`,
+`ascii` (codepoint → 1-char string), `not`, `empty`
 
-**Math**: `floor`, `ceil`, `fabs`, `sqrt`
+**Math**: `floor`, `ceil`, `fabs`, `sqrt`, `abs`
+
+**Paths**: `path(f)`, `paths`, `paths(f)`, `leaf_paths`, `getpath(p)`,
+`setpath(p; v)`, `del(p)`, `delpaths(paths)`
+
+**Format strings** (as filters over the input): `@text`, `@json`, `@base64`,
+`@base64d`, `@uri`, `@csv`, `@tsv`, `@sh`, `@html`. See `eval/Formats.kt`.
 
 ### Public API niceties
 - `Jq.format(v, raw, pretty)` — implements `-r` and pretty-print at the
-  output boundary. No CLI yet (see "Not implemented" below).
+  output boundary.
 - `JqOptions.args` populates `$name` variables (`--arg` / `--argjson`).
+
+### CLI (`JqCommand`)
+- `jq` is a registered kash command. Argv parsing handles:
+  - `-n`/`--null-input`, `-r`/`--raw-output`, `-c`/`--compact-output`
+    (output pretty-prints by default; `-c` compacts), `--tab` / `--indent N`
+    (0–7; 0 ⇒ compact), `-s`/`--slurp`, `-R`/`--raw-input`, `-S`/`--sort-keys`,
+    `-j`/`--join-output` (implies `-r`, no trailing newline), `-e`/`--exit-status`
+    (0 truthy / 1 null|false / 4 no output), `--` end-of-options.
+  - Combined single-dash short flags expand (`-Rr` ⇒ `-R -r`).
+  - File arguments: `jq FILTER file1 [file2 …]` — each file's content is
+    parsed as a JSON stream and the streams are concatenated in order. With
+    `-s`, all values across all files (or stdin) slurp into one array. No
+    file args ⇒ read stdin. Files are read through `ctx.fs`/`Paths.resolve`.
+  - `--arg name value` (binds `$name` to the string), `--argjson name json`
+    (binds parsed JSON; clear error on malformed JSON).
+  - `--slurpfile var file` (file's JSON stream → array bound to `$var`),
+    `--rawfile var file` (file contents as a string bound to `$var`).
+- Output pretty-prints by default (jq-style 2-space; `--tab`/`--indent` to
+  change, `-c` to compact). Missing files / malformed args exit 2.
 
 ---
 
 ## Not implemented
 
 ### Big ticket
-- **No `jq` shell builtin in kash.** Engine is reachable from Kotlin only.
-  Wiring `commands/Builtins.kt` to expose `jq` with argv parsing (`-r`, `-c`,
-  `-s`, `-n`, `-R`, `--arg`, `--argjson`, `--slurpfile`, `--rawfile`) is its
-  own task.
-- **`inputs` / `input`** — pull additional inputs mid-filter. Required for
-  `-n` (null input) and `-s` (slurp) CLI semantics. The engine takes a single
-  input; multi-input streaming hasn't been designed yet.
+- **CLI exists** (see "CLI (`JqCommand`)" above). Still missing on the CLI
+  surface: `-a`/`--ascii-output`, `-C`/`-M` (color), `--stream`, `--seq`,
+  `-f`/`--from-file`, `--args`/`--jsonargs` positional collectors.
 - **Number precision.** All arithmetic flows through `Double`. Big integers
   (`> 2^53`) lose precision. Upstream jq uses decimal-aware numerics now.
 
 ### Formats / encodings
-- `@csv`, `@tsv`, `@json`, `@uri`, `@base64`, `@base64d`, `@sh`, `@html`,
-  `@text`. Lexer tokenizes `@name` but no builtin/parser handling yet.
+- `@base32` / `@base32d` — not implemented.
+- The `@fmt "interp"` form (format applied to a string's interpolations) is
+  not modeled — the grammar admits only a bare `@name`, so formats act as
+  plain filters over the input value.
 
 ### Modules / I/O
 - `import`, `include`, modules
@@ -132,10 +172,9 @@ JSON is `com.accucodeai.kash.json.JsonValue` (alias of kotlinx-serialization's
   `isinfinite`, `isnormal`
 
 ### Strings
-- `explode` / `implode`
-- `splits(re; flags)` — stream form of split (regex-based)
-- `ascii` (codepoint to char)
 - `@base32` / `@base32d`
+- `ltrimstr`/`rtrimstr`/`trimstr` are byte/char exact; `trim`/`ltrim`/`rtrim`
+  (whitespace) not yet present
 
 ### Regex extensions
 - Backreferences (`\1` in patterns) — RE2 doesn't support them
@@ -153,7 +192,6 @@ JSON is `com.accucodeai.kash.json.JsonValue` (alias of kotlinx-serialization's
 - `getpath` with non-existent paths returning `null` — verify all corners
 - `truncate_stream`, `fromstream`, `tostream`
 - `limit` with negative `n`
-- `splits(re)` regex form (we have non-regex `split(sep)`)
 
 ---
 

@@ -15,6 +15,7 @@ import com.accucodeai.kash.tools.jq.ast.Comma
 import com.accucodeai.kash.tools.jq.ast.ErrorExpr
 import com.accucodeai.kash.tools.jq.ast.FieldAccess
 import com.accucodeai.kash.tools.jq.ast.Foreach
+import com.accucodeai.kash.tools.jq.ast.FormatStr
 import com.accucodeai.kash.tools.jq.ast.FuncCall
 import com.accucodeai.kash.tools.jq.ast.FunctionDef
 import com.accucodeai.kash.tools.jq.ast.Identity
@@ -348,7 +349,8 @@ internal class JqAstBuilder {
             }
 
             is JqParser.TermFormatContext -> {
-                throw JqParseError("format strings (@${ctx.FORMAT().text}) not supported in v1")
+                // FORMAT token text includes the leading '@'; strip it.
+                FormatStr(ctx.FORMAT().text.removePrefix("@"))
             }
 
             else -> {

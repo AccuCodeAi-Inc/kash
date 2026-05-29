@@ -93,6 +93,22 @@ internal object Builtins {
             }
             put0("type") { v -> jsonString(v.typeName()) }
             put0("empty") { _ -> null }
+
+            // input — pull the next value from the shared input stream, or
+            // error if exhausted (jq raises "No more inputs"). Ignores `.`.
+            this["input/0"] = { _, ctx, _ ->
+                val v = ctx.inputs.nextOrNull() ?: throw JqRuntimeError("No more inputs")
+                sequenceOf(v)
+            }
+            // inputs — stream every remaining input, lazily, until exhausted.
+            this["inputs/0"] = { _, ctx, _ ->
+                sequence {
+                    while (true) {
+                        val v = ctx.inputs.nextOrNull() ?: break
+                        yield(v)
+                    }
+                }
+            }
             put0("not") { v -> jsonBool(!v.isTruthy()) }
             put0("tostring") { v -> jsonString(v.asStringOrNull() ?: KashJson.encode(v)) }
             put0("tonumber") { v ->
@@ -198,6 +214,83 @@ internal object Builtins {
             put0("ceil") { v -> numericUnary(v) { kotlin.math.ceil(it) } }
             put0("fabs") { v -> numericUnary(v) { kotlin.math.abs(it) } }
             put0("sqrt") { v -> numericUnary(v) { kotlin.math.sqrt(it) } }
+            put0("abs") { v ->
+                when (v.kind()) {
+                    JsonKind.Number -> {
+                        val l = v.asLongOrNull()
+                        if (l != null) {
+                            if (l < 0) jsonNumber(-l) else v
+                        } else {
+                            val d = v.asDoubleOrNull()!!
+                            if (d < 0) numVal(-d) else v
+                        }
+                    }
+
+                    // jq's abs is identity for non-numbers.
+                    else -> {
+                        v
+                    }
+                }
+            }
+
+            // ----- type filters: select(type == X). Each emits input or nothing. ---
+            put0("arrays") { v -> if (v.kind() == JsonKind.Array) v else null }
+            put0("objects") { v -> if (v.kind() == JsonKind.Object) v else null }
+            put0("iterables") { v ->
+                if (v.kind() == JsonKind.Array || v.kind() == JsonKind.Object) v else null
+            }
+            put0("booleans") { v -> if (v.kind() == JsonKind.Boolean) v else null }
+            put0("numbers") { v -> if (v.kind() == JsonKind.Number) v else null }
+            put0("strings") { v -> if (v.kind() == JsonKind.String) v else null }
+            put0("nulls") { v -> if (v.kind() == JsonKind.Null) v else null }
+            put0("scalars") { v ->
+                if (v.kind() == JsonKind.Array || v.kind() == JsonKind.Object) null else v
+            }
+
+            // ----- string codepoint conversions -----------------------------------
+            put0("explode") { v ->
+                val s = v.asStringOrNull() ?: throw JqRuntimeError("explode input must be a string")
+                jsonArray(codepointsOf(s).map { jsonNumber(it.toLong()) })
+            }
+            put0("implode") { v ->
+                val a = v.asArrayOrNull() ?: throw JqRuntimeError("implode input must be an array")
+                val sb = StringBuilder()
+                for (e in a) {
+                    val cp =
+                        e.asLongOrNull()?.toInt()
+                            ?: throw JqRuntimeError("Input to implode is not a codepoint")
+                    sb.appendCodePointCompat(cp)
+                }
+                jsonString(sb.toString())
+            }
+            put0("ascii") { v ->
+                val cp = v.asLongOrNull()?.toInt() ?: throw JqRuntimeError("ascii input must be a number")
+                val sb = StringBuilder()
+                sb.appendCodePointCompat(cp)
+                jsonString(sb.toString())
+            }
+
+            // ----- flatten / transpose / toarray ----------------------------------
+            put0("flatten") { v ->
+                val a = v.asArrayOrNull() ?: throw JqRuntimeError("flatten: ${v.typeName()} is not an array")
+                jsonArray(flattenArray(a, Int.MAX_VALUE))
+            }
+            put0("toarray") { v ->
+                if (v is JsonArray) v else jsonArray(listOf(v))
+            }
+            put0("transpose") { v ->
+                val a = v.asArrayOrNull() ?: throw JqRuntimeError("transpose: ${v.typeName()} is not an array")
+                val rows =
+                    a.map {
+                        it.asArrayOrNull() ?: throw JqRuntimeError("transpose: element is not an array")
+                    }
+                val maxLen = rows.maxOfOrNull { it.size } ?: 0
+                val out =
+                    (0 until maxLen).map { col ->
+                        jsonArray(rows.map { row -> row.getOrNull(col) ?: jsonNull() })
+                    }
+                jsonArray(out)
+            }
             // paths/0 and leaf_paths/0 are streams in jq — emit each path separately.
             this["paths/0"] = { _, _, input -> allPaths(input).map { jsonArray(it) } }
             this["leaf_paths/0"] = { _, _, input -> leafPaths(input).map { jsonArray(it) } }
@@ -339,6 +432,44 @@ internal object Builtins {
                 }
             }
             put1("contains") { a, b -> jsonBool(jqContains(a, b)) }
+            // inside(xs) — inverse of contains: xs contains input.
+            put1("inside") { a, b -> jsonBool(jqContains(b, a)) }
+            // flatten(depth) — flatten nested arrays up to `depth` levels.
+            put1("flatten") { a, b ->
+                val arr = a.asArrayOrNull() ?: throw JqRuntimeError("flatten: ${a.typeName()} is not an array")
+                val depth =
+                    b.asLongOrNull()?.toInt() ?: throw JqRuntimeError("flatten depth must be an integer")
+                if (depth < 0) throw JqRuntimeError("flatten depth must not be negative")
+                jsonArray(flattenArray(arr, depth))
+            }
+            // trimstr(s) — strip prefix AND suffix if present (jq 1.7+).
+            put1("trimstr") { a, b ->
+                val sa = a.asStringOrNull() ?: return@put1 a
+                val sb = b.asStringOrNull() ?: return@put1 a
+                if (sb.isEmpty()) return@put1 a
+                var r = sa
+                if (r.startsWith(sb)) r = r.substring(sb.length)
+                if (r.endsWith(sb) && r.length >= sb.length) r = r.substring(0, r.length - sb.length)
+                jsonString(r)
+            }
+            // index(s) / rindex(s) / indices(s) — for strings (substring) and arrays.
+            put1("index") { a, b -> indicesOf(a, b).firstOrNull()?.let { jsonNumber(it.toLong()) } ?: jsonNull() }
+            put1("rindex") { a, b -> indicesOf(a, b).lastOrNull()?.let { jsonNumber(it.toLong()) } ?: jsonNull() }
+            put1("indices") { a, b -> jsonArray(indicesOf(a, b).map { jsonNumber(it.toLong()) }) }
+            // delpaths(paths) — delete every path in the given array of paths.
+            put1Seq("delpaths") { f, ctx, input ->
+                f.eval(ctx, input).map { pathsVal ->
+                    val arr =
+                        pathsVal as? JsonArray
+                            ?: throw JqRuntimeError("delpaths: argument must be an array of paths")
+                    val pathList =
+                        arr.map { p ->
+                            (p as? JsonArray)?.toList()
+                                ?: throw JqRuntimeError("delpaths: each path must be an array")
+                        }
+                    deletePaths(input, pathList)
+                }
+            }
             put1("startswith") { a, b ->
                 val sa = a.asStringOrNull() ?: throw JqRuntimeError("startswith: ${a.typeName()}")
                 val sb = b.asStringOrNull() ?: throw JqRuntimeError("startswith: ${b.typeName()}")
@@ -579,6 +710,21 @@ internal object Builtins {
                 }
             }
 
+            // splits(re) / splits(re; flags) — stream the parts of the input
+            // string between regex matches (regex form of split).
+            put1Seq("splits") { f, ctx, input ->
+                splitsSeq(f, null, ctx, input)
+            }
+            put2Seq("splits") { f, g, ctx, input ->
+                splitsSeq(f, g, ctx, input)
+            }
+
+            // split(re; flags) — array form of splits (jq's 2-arg split is
+            // regex-based; the 1-arg split(sep) above is a plain literal split).
+            put2Seq("split") { f, g, ctx, input ->
+                sequenceOf(jsonArray(splitsSeq(f, g, ctx, input).toList()))
+            }
+
             // sub(re; repl) / sub(re; repl; flags) — replace first match; repl is a filter.
             put2Seq("sub") { f, repl, ctx, input ->
                 subSeq(f, repl, flagsFilter = null, global = false, ctx = ctx, input = input)
@@ -762,6 +908,117 @@ internal object Builtins {
             else -> throw JqRuntimeError("keys: ${v.typeName()} has no keys")
         }
 
+    private fun flattenArray(
+        arr: List<JsonValue>,
+        depth: Int,
+    ): List<JsonValue> {
+        val out = mutableListOf<JsonValue>()
+        for (e in arr) {
+            if (e is JsonArray && depth > 0) {
+                out += flattenArray(e, depth - 1)
+            } else {
+                out += e
+            }
+        }
+        return out
+    }
+
+    /** Codepoints of [s], correctly pairing UTF-16 surrogates. */
+    private fun codepointsOf(s: String): List<Int> {
+        val out = mutableListOf<Int>()
+        var i = 0
+        while (i < s.length) {
+            val c = s[i]
+            if (c.isHighSurrogate() && i + 1 < s.length && s[i + 1].isLowSurrogate()) {
+                out += (0x10000 + ((c.code - 0xD800) shl 10) + (s[i + 1].code - 0xDC00))
+                i += 2
+            } else {
+                out += c.code
+                i++
+            }
+        }
+        return out
+    }
+
+    /** Append a Unicode codepoint as UTF-16 (multiplatform-safe; no java.lang.Character). */
+    private fun StringBuilder.appendCodePointCompat(cp: Int) {
+        if (cp < 0 || cp > 0x10FFFF) throw JqRuntimeError("Invalid codepoint: $cp")
+        if (cp <= 0xFFFF) {
+            append(cp.toChar())
+        } else {
+            val v = cp - 0x10000
+            append((0xD800 + (v shr 10)).toChar())
+            append((0xDC00 + (v and 0x3FF)).toChar())
+        }
+    }
+
+    /**
+     * All start positions where [needle] occurs in [haystack].
+     *
+     * - string in string: substring match positions (char index).
+     * - element in array: every index `i` where `haystack[i] == needle`.
+     * - array (non-empty) in array: every index where the subsequence matches.
+     * - empty-array needle: jq returns null/empty — we return no indices.
+     */
+    private fun indicesOf(
+        haystack: JsonValue,
+        needle: JsonValue,
+    ): List<Int> =
+        when {
+            haystack.kind() == JsonKind.Null -> {
+                emptyList()
+            }
+
+            haystack.asStringOrNull() != null && needle.asStringOrNull() != null -> {
+                val h = haystack.asStringOrNull()!!
+                val n = needle.asStringOrNull()!!
+                if (n.isEmpty()) {
+                    emptyList()
+                } else {
+                    val out = mutableListOf<Int>()
+                    var from = h.indexOf(n)
+                    while (from >= 0) {
+                        out += from
+                        from = h.indexOf(n, from + 1)
+                    }
+                    out
+                }
+            }
+
+            haystack is JsonArray && needle is JsonArray -> {
+                if (needle.isEmpty()) {
+                    emptyList()
+                } else {
+                    val out = mutableListOf<Int>()
+                    var i = 0
+                    while (i + needle.size <= haystack.size) {
+                        var matched = true
+                        for (j in needle.indices) {
+                            if (!jqEquals(haystack[i + j], needle[j])) {
+                                matched = false
+                                break
+                            }
+                        }
+                        if (matched) out += i
+                        i++
+                    }
+                    out
+                }
+            }
+
+            haystack is JsonArray -> {
+                val out = mutableListOf<Int>()
+                for ((i, e) in haystack.withIndex()) {
+                    if (jqEquals(e, needle)) out += i
+                }
+                out
+            }
+
+            else -> {
+                throw JqRuntimeError("Cannot index ${haystack.typeName()}")
+            }
+        }
+
     private fun numericUnary(
         v: JsonValue,
         f: (Double) -> Double,
@@ -826,6 +1083,35 @@ internal object Builtins {
         }
 
     // ---- regex helpers ------------------------------------------------------
+
+    /**
+     * Stream the substrings of [input] lying between successive regex matches
+     * (the engine behind `splits` / 2-arg `split`). Mirrors `matchSeq`'s
+     * pattern + flags handling; the split is inherently global, so a `g` flag
+     * is ignored rather than required.
+     */
+    private fun splitsSeq(
+        patternFilter: JqExpr,
+        flagsFilter: JqExpr?,
+        ctx: JqContext,
+        input: JsonValue,
+    ): Sequence<JsonValue> =
+        sequence {
+            val s = input.asStringOrNull() ?: throw JqRuntimeError("splits: input must be string")
+            for (p in patternFilter.eval(ctx, input)) {
+                val pat = p.asStringOrNull() ?: throw JqRuntimeError("splits: pattern must be string")
+                val rawFlags = flagsFilter?.eval(ctx, input)?.firstOrNull()?.asStringOrNull() ?: ""
+                val re = compileRegex(pat, rawFlags.filter { it != 'g' })
+                var last = 0
+                for (m in re.findAll(s)) {
+                    // Guard against a zero-width match looping in place.
+                    if (m.offset < last) continue
+                    yield(jsonString(s.substring(last, m.offset)))
+                    last = m.offset + m.length
+                }
+                yield(jsonString(s.substring(last)))
+            }
+        }
 
     private fun matchSeq(
         patternFilter: JqExpr,

@@ -17,11 +17,14 @@ public object KashJson {
         }
 
     @OptIn(ExperimentalSerializationApi::class)
-    private val pretty =
+    private val pretty = prettyJsonFor("  ")
+
+    @OptIn(ExperimentalSerializationApi::class)
+    private fun prettyJsonFor(indent: String): Json =
         Json {
             ignoreUnknownKeys = false
             prettyPrint = true
-            prettyPrintIndent = "  "
+            prettyPrintIndent = indent
             allowSpecialFloatingPointValues = true
         }
 
@@ -44,11 +47,12 @@ public object KashJson {
     public fun encode(
         v: JsonValue,
         pretty: Boolean = false,
+        indent: String = "  ",
     ): String =
-        if (pretty) {
-            this.pretty.encodeToString(JsonElement.serializer(), v)
-        } else {
-            compact.encodeToString(JsonElement.serializer(), v)
+        when {
+            !pretty -> compact.encodeToString(JsonElement.serializer(), v)
+            indent == "  " -> this.pretty.encodeToString(JsonElement.serializer(), v)
+            else -> prettyJsonFor(indent).encodeToString(JsonElement.serializer(), v)
         }
 }
 
