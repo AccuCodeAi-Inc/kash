@@ -3,11 +3,14 @@
 <head>
     <meta charset="UTF-8">
     <!-- Mobile viewport: lock zoom (pinch / double-tap would break the
-         cell-grid math), and `interactive-widget=resizes-content` so the
-         soft keyboard resizes the visual viewport rather than overlaying
-         it (we mirror that height onto the body in MobileSupport.kt). -->
+         cell-grid math). We intentionally leave `interactive-widget` at its
+         default (resizes-visual): the soft keyboard then resizes only the
+         VISUAL viewport, firing visualViewport events but NOT browser-driven
+         layout resizes. That makes the single debounced handler in
+         MobileSupport.kt the one code path that resizes the canvas, so it can
+         settle once instead of jittering per animation frame. -->
     <meta name="viewport"
-          content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, interactive-widget=resizes-content">
+          content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
     <title>Kash: Browser Terminal</title>
     <!-- Cross-origin isolation for static hosts (e.g. GitHub Pages) that can't
          set COOP/COEP response headers. This service worker re-injects them so

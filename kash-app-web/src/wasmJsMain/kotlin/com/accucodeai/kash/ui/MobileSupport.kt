@@ -14,11 +14,20 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.KeyboardArrowLeft
+import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
+import androidx.compose.material.icons.filled.ExpandMore
+import androidx.compose.material.icons.filled.Keyboard
+import androidx.compose.material.icons.filled.KeyboardArrowDown
+import androidx.compose.material.icons.filled.KeyboardArrowUp
+import androidx.compose.material3.Icon
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
@@ -238,16 +247,47 @@ internal fun MobileAccessoryBar(
         AccKey("esc") { onKey(Key.Named.ESC) }
         AccKey("tab") { onKey(Key.Named.TAB) }
         AccKey("ctrl", active = ctrlLatched) { onToggleCtrl() }
-        AccKey("◂") { onKey(Key.Named.LEFT) }
-        AccKey("▴") { onKey(Key.Named.UP) }
-        AccKey("▾") { onKey(Key.Named.DOWN) }
-        AccKey("▸") { onKey(Key.Named.RIGHT) }
+        // Directional + hide keys use Material vector icons (drawn by
+        // Compose, not font glyphs) so they never tofu regardless of which
+        // glyphs the bundled monospace faces happen to carry.
+        AccKeyIcon(Icons.AutoMirrored.Filled.KeyboardArrowLeft, "Left") { onKey(Key.Named.LEFT) }
+        AccKeyIcon(Icons.Filled.KeyboardArrowUp, "Up") { onKey(Key.Named.UP) }
+        AccKeyIcon(Icons.Filled.KeyboardArrowDown, "Down") { onKey(Key.Named.DOWN) }
+        AccKeyIcon(Icons.AutoMirrored.Filled.KeyboardArrowRight, "Right") { onKey(Key.Named.RIGHT) }
         // Shell-critical symbols, in code-point form so the sticky-Ctrl
-        // latch in onScalar can fold them if Ctrl is held.
+        // latch in onScalar can fold them if Ctrl is held. All ASCII, so
+        // they render in JetBrains Mono.
         for (sym in listOf('|', '/', '\\', '-', '~', '*', '$', ':', '"', '\'')) {
             AccKey(sym.toString()) { onScalar(sym.code) }
         }
-        AccKey("⌄") { onHideKeyboard() }
+        AccKeyIcon(Icons.Filled.ExpandMore, "Hide keyboard") { onHideKeyboard() }
+    }
+}
+
+/** A single tappable icon key in the accessory bar. */
+@Composable
+@Suppress("ktlint:standard:function-naming")
+private fun AccKeyIcon(
+    icon: ImageVector,
+    contentDescription: String,
+    onTap: () -> Unit,
+) {
+    Box(
+        modifier =
+            Modifier
+                .padding(horizontal = 3.dp, vertical = 6.dp)
+                .size(width = 40.dp, height = 32.dp)
+                .clip(RoundedCornerShape(6.dp))
+                .background(Color(0xFF2A2A2A))
+                .clickable { onTap() },
+        contentAlignment = Alignment.Center,
+    ) {
+        Icon(
+            imageVector = icon,
+            contentDescription = contentDescription,
+            tint = Color(0xFFEAEAEA),
+            modifier = Modifier.size(20.dp),
+        )
     }
 }
 
@@ -299,10 +339,11 @@ internal fun KeyboardFab(
                 .clickable { onClick() },
         contentAlignment = Alignment.Center,
     ) {
-        androidx.compose.material3.Text(
-            text = "⌨",
-            color = Color(0xFFEAEAEA),
-            fontSize = 22.sp,
+        Icon(
+            imageVector = Icons.Filled.Keyboard,
+            contentDescription = "Show keyboard",
+            tint = Color(0xFFEAEAEA),
+            modifier = Modifier.size(24.dp),
         )
     }
 }
@@ -383,22 +424,39 @@ internal fun installMobileViewportFix() {
                 if (window.__kashVVBound || !window.visualViewport) return;
                 window.__kashVVBound = true;
                 var vv = window.visualViewport;
+                var lastH = -1;
                 var apply = function () {
                     var h = Math.round(vv.height);
-                    if (h > 0) {
-                        document.documentElement.style.height = h + 'px';
-                        document.body.style.height = h + 'px';
-                        // REQUIRED, not optional: Compose's ComposeViewport
-                        // recomputes its canvas size ONLY on a `window`
-                        // 'resize' event (it then reads body.clientHeight) —
-                        // it has no ResizeObserver on the body. Without this
-                        // synthetic dispatch the canvas never shrinks and the
-                        // keyboard would overlay the prompt + accessory bar.
-                        window.dispatchEvent(new Event('resize'));
-                    }
+                    // Skip no-op applies — re-laying-out the canvas (and the
+                    // terminal's row recompute + SIGWINCH redraw) for the same
+                    // height is what showed up as jitter.
+                    if (h <= 0 || h === lastH) return;
+                    lastH = h;
+                    document.documentElement.style.height = h + 'px';
+                    document.body.style.height = h + 'px';
+                    // REQUIRED, not optional: Compose's ComposeViewport
+                    // recomputes its canvas size ONLY on a `window` 'resize'
+                    // event (it then reads body.clientHeight) — it has no
+                    // ResizeObserver on the body. Without this synthetic
+                    // dispatch the canvas never shrinks and the keyboard would
+                    // overlay the prompt + accessory bar.
+                    window.dispatchEvent(new Event('resize'));
                 };
-                vv.addEventListener('resize', apply);
-                vv.addEventListener('scroll', apply);
+                // The keyboard animation fires a burst of resize/scroll events
+                // (continuously on iOS). Debounce so we resize the canvas ONCE
+                // the height settles instead of on every animation frame —
+                // that per-frame churn is the jitter. Trailing-only: we wait
+                // ~110ms after the last event, then apply the final height.
+                var pending = -1;
+                var schedule = function () {
+                    if (pending !== -1) window.clearTimeout(pending);
+                    pending = window.setTimeout(function () {
+                        pending = -1;
+                        apply();
+                    }, 110);
+                };
+                vv.addEventListener('resize', schedule);
+                vv.addEventListener('scroll', schedule);
                 apply();
             } catch (_) { /* best effort */ }
         }""",
