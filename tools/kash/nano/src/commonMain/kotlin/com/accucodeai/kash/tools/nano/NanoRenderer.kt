@@ -143,20 +143,31 @@ internal class NanoRenderer(
 
     private fun shortcuts(
         row1: Boolean,
-        @Suppress("UNUSED_PARAMETER") cols: Int,
+        cols: Int,
     ): String {
         val sb = StringBuilder()
-        for ((i, col) in helpColumns.withIndex()) {
+        // Track the *visible* width (ANSI escapes don't occupy cells) and
+        // stop adding columns once the next one — plus its leading
+        // separator — would overflow the line. A shortcut bar wider than
+        // `cols` auto-wraps onto an extra row in the terminal, which shoves
+        // every row below it down and corrupts nano's fixed-row layout
+        // (most visible on narrow / mobile viewports). GNU nano likewise
+        // drops trailing shortcuts when the terminal is too narrow.
+        var visible = 0
+        for (col in helpColumns) {
             val (top, bot) = col
             val topPlain = top.first.length + 1 + top.second.length // "^G Help" → 7
             val botPlain = bot.first.length + 1 + bot.second.length
             val cellWidth = maxOf(topPlain, botPlain)
+            val sep = if (visible == 0) 0 else 2
+            if (visible + sep + cellWidth > cols) break
+            if (sep > 0) sb.append("  ")
             val (myKey, myLabel) = if (row1) top else bot
             val plainLen = myKey.length + 1 + myLabel.length
             val pad = (cellWidth - plainLen).coerceAtLeast(0)
             sb.append("${Ansi.INVERSE}$myKey${Ansi.RESET} $myLabel")
             sb.append(" ".repeat(pad))
-            if (i < helpColumns.size - 1) sb.append("  ")
+            visible += sep + cellWidth
         }
         return sb.toString()
     }

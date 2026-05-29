@@ -101,8 +101,12 @@ internal class LessMinibuffer(
         sb.append(Ansi.HIDE_CURSOR)
         sb.append(Ansi.moveTo(row, 1))
         sb.append(Ansi.CLEAR_TO_EOL)
-        sb.append(prompt)
-        sb.append(text)
+        // Clamp to cols so a long query doesn't wrap the bottom row and
+        // scroll the pager body out from under itself on narrow screens.
+        // Keep the tail (where the caret sits) visible — same approach as
+        // the nano / vi minibuffers.
+        val combined = prompt + text
+        sb.append(if (combined.length > cols) combined.substring(combined.length - cols) else combined)
         val caretCol = (prompt.length + cursor + 1).coerceAtMost(cols)
         sb.append(Ansi.moveTo(row, caretCol))
         sb.append(Ansi.SHOW_CURSOR)
