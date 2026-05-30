@@ -2,6 +2,7 @@
 
 package com.accucodeai.kash.tools.python3.pyodide.worker
 
+import com.accucodeai.kash.api.ansi.Ansi
 import com.accucodeai.kash.api.io.SuspendSink
 import com.accucodeai.kash.api.io.SuspendSource
 import com.accucodeai.kash.api.io.readAllBytes
@@ -284,7 +285,7 @@ internal class SabFsServer(
         val sb = StringBuilder()
         var first = true
         for (n in names) {
-            if (!first) sb.append('\u0000')
+            if (!first) sb.append(Ansi.NUL)
             sb.append(n)
             first = false
         }

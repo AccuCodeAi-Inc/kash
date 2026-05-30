@@ -2,6 +2,94 @@ package com.accucodeai.kash.tools.git.porcelain
 
 import com.accucodeai.kash.tools.git.GitRepo
 import com.accucodeai.kash.tools.git.plumbing.ObjectType
+import kotlin.coroutines.cancellation.CancellationException
+
+/**
+ * Build a `git log --decorate` map: commit sha → the decoration string
+ * git renders inside `(...)`. Mirrors observed real-git ordering:
+ *  1. `HEAD` (bare when detached, `HEAD -> <branch>` when symbolic)
+ *  2. tags (`tag: <name>`), reverse-alphabetical
+ *  3. remote branches (`<remote>/<name>`), reverse-alphabetical
+ *  4. local branches (`<name>`), reverse-alphabetical, minus the branch
+ *     HEAD already points at
+ *
+ * [full] keeps the full `refs/...` ref paths (for `--decorate=full`);
+ * the default short form strips `refs/heads/`, `refs/tags/`,
+ * `refs/remotes/`.
+ */
+public suspend fun buildDecorations(
+    repo: GitRepo,
+    full: Boolean,
+): Map<String, String> {
+    val head = repo.refs.readHead()
+    val headBranch =
+        (head as? com.accucodeai.kash.tools.git.plumbing.RefStore.Head.Symbolic)?.target
+    val headSha = repo.refs.resolveHead()
+
+    // Group refs by their target sha.
+    data class Group(
+        val tags: MutableList<String> = mutableListOf(),
+        val remotes: MutableList<String> = mutableListOf(),
+        val locals: MutableList<String> = mutableListOf(),
+    )
+
+    val bySha = mutableMapOf<String, Group>()
+
+    fun group(sha: String) = bySha.getOrPut(sha) { Group() }
+
+    for ((ref, sha) in repo.refs.listRefs("refs/heads")) {
+        group(sha).locals += ref
+    }
+    for ((ref, sha) in repo.refs.listRefs("refs/tags")) {
+        // Peel annotated tags to the commit they decorate.
+        val peeled = dereferenceTagPublic(repo, sha)
+        group(peeled).tags += ref
+        if (peeled != sha) group(sha).tags += ref
+    }
+    for ((ref, sha) in repo.refs.listRefs("refs/remotes")) {
+        group(sha).remotes += ref
+    }
+
+    fun shortName(ref: String): String =
+        if (full) {
+            ref
+        } else {
+            ref
+                .removePrefix("refs/heads/")
+                .removePrefix("refs/tags/")
+                .removePrefix("refs/remotes/")
+        }
+
+    val out = mutableMapOf<String, String>()
+    val allShas = bySha.keys + listOfNotNull(headSha)
+    for (sha in allShas) {
+        val g = bySha[sha]
+        val parts = mutableListOf<String>()
+        if (sha == headSha) {
+            if (headBranch != null) {
+                val b = if (full) headBranch else headBranch.removePrefix("refs/heads/")
+                parts += "HEAD -> $b"
+            } else {
+                parts += "HEAD"
+            }
+        }
+        if (g != null) {
+            for (t in g.tags.sortedDescending()) parts += "tag: ${shortName(t)}"
+            for (r in g.remotes.sortedDescending()) parts += shortName(r)
+            for (l in g.locals.sortedDescending()) {
+                if (l == headBranch) continue
+                parts += shortName(l)
+            }
+        }
+        if (parts.isNotEmpty()) out[sha] = parts.joinToString(", ")
+    }
+    return out
+}
+
+private suspend fun dereferenceTagPublic(
+    repo: GitRepo,
+    sha: String,
+): String = dereferenceTag(repo, sha)
 
 /**
  * Resolve a revision spec to a commit (or object) sha.
@@ -20,10 +108,10 @@ import com.accucodeai.kash.tools.git.plumbing.ObjectType
  *  - `<rev>@{upstream}` / `<rev>@{u}` → the upstream tracking ref
  *    (resolved via `branch.<rev>.remote` + `.merge` in `.git/config`;
  *    falls back to `refs/remotes/origin/<rev>` if no config entry)
+ *  - `<rev>@{N}` → the Nth-prior reflog value (`0` = current)
  *
- * Not supported (and probably never will be in kash):
- *  - `<rev>@{N}` reflog indexing — we don't keep a reflog
- *  - `<rev>@{<date>}` — same reason
+ * Not supported:
+ *  - `<rev>@{<date>}` → reflog-by-timestamp (we don't index the reflog by date)
  *  - `:/​<text>` message search — niche, defer
  *
  * Returns null when the spec doesn't resolve. Callers decide whether
@@ -185,6 +273,8 @@ private suspend fun dereferenceTag(
             try {
                 com.accucodeai.kash.tools.git.plumbing
                     .parseFramedObject(repo.objects.read(cur))
+            } catch (ce: CancellationException) {
+                throw ce
             } catch (_: Throwable) {
                 return cur
             }
@@ -250,19 +340,24 @@ private suspend fun peel(
     target: String,
 ): String? {
     var cur = sha
-    // De-reference annotated tags (we don't actually have a tag-object
-    // reader yet; readParsed will fail gracefully on miss).
-    // Best-effort: try reading as commit; if that works we already have
-    // what we need for "commit". For "tree", read the commit and grab tree.
+    // Annotated tags are already de-referenced upstream by dereferenceTag
+    // (via decodeTag) during base resolution, so by the time we get here
+    // `cur` is normally a commit or tree. Best-effort: try reading as a
+    // commit; if that works we have what we need for "commit". For "tree",
+    // read the commit and grab its tree.
     return when (target) {
         "tree" -> {
             try {
                 repo.objects.readCommit(cur).tree
+            } catch (ce: CancellationException) {
+                throw ce
             } catch (_: Throwable) {
                 // Maybe it's already a tree.
                 val p =
                     try {
                         repo.objects.readParsed(cur)
+                    } catch (ce: CancellationException) {
+                        throw ce
                     } catch (_: Throwable) {
                         return null
                     }
@@ -271,12 +366,14 @@ private suspend fun peel(
         }
 
         "commit", "" -> {
-            // Try reading; if commit, return as-is. If tag, we'd peel
-            // through tag.object — but we don't have a tag decoder yet,
-            // and lightweight tags resolve through resolveBase already.
+            // Read and accept it only if it's a commit. Annotated tags were
+            // already peeled by dereferenceTag during resolution, so there's
+            // no need to re-decode tag.object here.
             val p =
                 try {
                     repo.objects.readParsed(cur)
+                } catch (ce: CancellationException) {
+                    throw ce
                 } catch (_: Throwable) {
                     return null
                 }

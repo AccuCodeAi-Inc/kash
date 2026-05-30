@@ -11,6 +11,7 @@ kotlin {
             api(project(":api"))
             implementation(project(":shared:difflib"))
             implementation(project(":shared:hash"))
+            implementation(project(":shared:regex"))
         }
         commonTest.dependencies {
             implementation(project(":coretest"))

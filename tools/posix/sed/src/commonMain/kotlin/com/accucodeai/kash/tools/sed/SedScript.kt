@@ -1,6 +1,7 @@
 package com.accucodeai.kash.tools.sed
 
 import com.accucodeai.kash.shared.regex.LinearRegex
+import com.accucodeai.kash.shared.regex.breToEre
 
 /**
  * Parsed sed program. Supports the high-leverage POSIX/GNU subset:
@@ -283,69 +284,6 @@ internal class ReplacementTemplate(
             return ReplacementTemplate(parts)
         }
     }
-}
-
-/**
- * Translate a POSIX BRE regex into RE2/ERE form by swapping which characters
- * are escaped: in BRE, `\(\)\{\}\+\?\|` are metas and bare `()` `{}` `+?|`
- * are literals; in ERE it's the inverse. Other escapes (`\n`, `\t`, `\\`,
- * `\1`..`\9`, `\.`, etc.) pass through unchanged. Characters inside `[...]`
- * are not transformed (POSIX bracket-expression syntax doesn't vary).
- */
-internal fun breToEre(s: String): String {
-    val sb = StringBuilder(s.length)
-    var i = 0
-    var inClass = false
-    var classOpen = -1
-    while (i < s.length) {
-        val c = s[i]
-        if (inClass) {
-            sb.append(c)
-            val sincOpen = i - classOpen
-            // A `]` is literal if it appears first (after `[` or `[^`).
-            if (c == ']' && sincOpen > 1 && !(sincOpen == 2 && s[classOpen + 1] == '^')) {
-                inClass = false
-            } else if (c == '\\' && i + 1 < s.length) {
-                sb.append(s[i + 1])
-                i += 2
-                continue
-            }
-            i++
-            continue
-        }
-        when (c) {
-            '[' -> {
-                inClass = true
-                classOpen = i
-                sb.append(c)
-                i++
-            }
-
-            '\\' -> {
-                if (i + 1 < s.length) {
-                    when (val n = s[i + 1]) {
-                        '(', ')', '{', '}', '+', '?', '|' -> sb.append(n)
-                        else -> sb.append('\\').append(n)
-                    }
-                    i += 2
-                } else {
-                    sb.append(c)
-                    i++
-                }
-            }
-
-            '(', ')', '{', '}', '+', '?', '|' -> {
-                sb.append('\\').append(c)
-                i++
-            }
-
-            else -> {
-                sb.append(c)
-                i++
-            }
-        }
-    }
-    return sb.toString()
 }
 
 internal object SedScriptParser {

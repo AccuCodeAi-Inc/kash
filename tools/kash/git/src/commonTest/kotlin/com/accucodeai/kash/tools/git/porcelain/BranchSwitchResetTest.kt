@@ -69,7 +69,8 @@ class BranchSwitchResetTest {
             seedRepoWithCommit(fs)
             val r = run(fs, "/r", "branch", "-d", "main")
             assertEquals(1, r.rc)
-            assertTrue("checked out" in r.stderr, r.stderr)
+            // Real git: "cannot delete branch 'main' used by worktree at '<path>'".
+            assertTrue("cannot delete branch 'main'" in r.stderr, r.stderr)
         }
 
     @Test fun switchSwitchesBranchAndUpdatesWorkTree() =

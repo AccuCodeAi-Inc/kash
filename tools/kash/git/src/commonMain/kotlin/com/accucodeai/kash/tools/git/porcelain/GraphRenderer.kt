@@ -1,6 +1,7 @@
 package com.accucodeai.kash.tools.git.porcelain
 
 import com.accucodeai.kash.tools.git.GitRepo
+import kotlin.coroutines.cancellation.CancellationException
 
 /**
  * ASCII graph renderer for `git log --graph`. Tracks the open lanes
@@ -158,6 +159,8 @@ internal suspend fun topoOrder(
         val c =
             try {
                 repo.objects.readCommit(cur)
+            } catch (ce: CancellationException) {
+                throw ce
             } catch (_: Throwable) {
                 continue
             }

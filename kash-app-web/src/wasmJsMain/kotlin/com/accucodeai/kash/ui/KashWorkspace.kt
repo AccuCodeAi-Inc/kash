@@ -37,6 +37,7 @@ import androidx.compose.material.icons.filled.ChevronLeft
 import androidx.compose.material.icons.filled.ChevronRight
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.ContentCopy
+import androidx.compose.material.icons.filled.ContentPaste
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.DriveFileRenameOutline
@@ -45,12 +46,11 @@ import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material.icons.filled.FolderOpen
 import androidx.compose.material.icons.filled.History
 import androidx.compose.material.icons.filled.Info
-import androidx.compose.material.icons.filled.InsertDriveFile
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.RestartAlt
 import androidx.compose.material.icons.filled.Save
-import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.SmartToy
+import androidx.compose.material.icons.filled.Upload
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Checkbox
@@ -92,6 +92,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.DpOffset
 import androidx.compose.ui.unit.dp
 import com.accucodeai.kash.api.CommandRegistry
+import com.accucodeai.kash.api.sandbox.NetworkPolicy
 import com.accucodeai.kash.fs.sanitizeDropName
 import com.accucodeai.kash.fs.uniqueDropPath
 import com.accucodeai.kash.webres.JetBrainsMono_Bold
@@ -136,7 +137,7 @@ import kotlin.time.Duration.Companion.milliseconds
  */
 @Composable
 @Suppress("ktlint:standard:function-naming")
-public fun KashWorkspace(registry: CommandRegistry) {
+public fun KashWorkspace(registryFactory: (NetworkPolicy) -> CommandRegistry) {
     // ONE virtual machine for the whole web app — one fs, one process
     // table, one /proc, one init. Tabs are sibling kash children of
     // that init, so files / processes are shared across them.
@@ -145,7 +146,17 @@ public fun KashWorkspace(registry: CommandRegistry) {
     // running shells, throw away the old VM, install a fresh one. A
     // fresh VM means fresh InMemoryFs, fresh /proc, fresh process
     // table — equivalent to rebooting the box.
-    var workspace by remember { mutableStateOf(KashWorkspaceVm(registry)) }
+    // When kash is embedded (iframe / popup), it must not read or write the
+    // persistent snapshot store — otherwise the host's instance could load
+    // (and then export) the user's first-party autosave. Suppressing
+    // autosave here isolates embedded instances regardless of whether the
+    // browser partitions third-party storage. Embedded mode also starts
+    // from the locked-down policy default (no network, SAFE sandbox).
+    val embedded = remember { isEmbedded() }
+    var policy by remember {
+        mutableStateOf(if (embedded) WorkspacePolicy.Embedded else WorkspacePolicy.Standalone)
+    }
+    var workspace by remember { mutableStateOf(KashWorkspaceVm(registryFactory, policy)) }
     val focusManager = LocalFocusManager.current
     // Coroutine scope for the document-level drop host's async file
     // reads. Tied to this composable so it dies with the workspace.
@@ -241,7 +252,9 @@ public fun KashWorkspace(registry: CommandRegistry) {
     // time), files come back but shell state starts fresh.
     LaunchedEffect(Unit) {
         if (tabs.isEmpty()) {
-            val autosave = BrowserSnapshotStore.loadAutosave()
+            // Embedded instances start clean — never resurrect the
+            // first-party autosave.
+            val autosave = if (embedded) null else BrowserSnapshotStore.loadAutosave()
             if (autosave != null) {
                 when (autosave) {
                     is BrowserSnapshotStore.Payload.Full -> workspace.restoreFull(autosave.snapshot)
@@ -259,6 +272,7 @@ public fun KashWorkspace(registry: CommandRegistry) {
     // kill. `beforeunload` is the primary save trigger (below) but it
     // isn't guaranteed to fire (force-kill, mobile suspend, OOM).
     LaunchedEffect(workspace) {
+        if (embedded) return@LaunchedEffect
         while (true) {
             delay(30_000.milliseconds)
             workspace.writeAutosave()
@@ -270,6 +284,7 @@ public fun KashWorkspace(registry: CommandRegistry) {
     // before the page unloads. We never preventDefault / return a string;
     // showing an "are you sure" dialog would be hostile.
     DisposableEffect(workspace) {
+        if (embedded) return@DisposableEffect onDispose { }
         val handler: (org.w3c.dom.events.Event) -> Unit = { workspace.writeAutosave() }
         window.addEventListener("beforeunload", handler)
         onDispose { window.removeEventListener("beforeunload", handler) }
@@ -277,11 +292,21 @@ public fun KashWorkspace(registry: CommandRegistry) {
 
     // Dialog state.
     var saveDialog by remember { mutableStateOf(false) }
-    var loadDialog by remember { mutableStateOf(false) }
     var manageDialog by remember { mutableStateOf(false) }
     var aboutDialog by remember { mutableStateOf(false) }
     var aiSetupDialog by remember { mutableStateOf(false) }
     var statusMessage by remember { mutableStateOf<String?>(null) }
+
+    // KashFrame (cross-origin embedding). Disabled unless the page URL
+    // carries an embedder allowlist. `frameRequest` holds a host-initiated
+    // op awaiting (or skipping, for trusted origins) user confirmation.
+    val frameAllowed = remember { KashFrameConfig.allowedEmbedders() }
+    val frameTrusted = remember { KashFrameConfig.trustedEmbedders() }
+    val frameOrigin = remember { mutableStateOf<String?>(null) }
+    var frameRequest by remember { mutableStateOf<KashFrameRequest?>(null) }
+    // A host-supplied policy awaiting application (applied by rebuilding the
+    // VM in the composition, not from the JS callback stack).
+    var pendingConfigure by remember { mutableStateOf<PendingConfigure?>(null) }
 
     // FS explorer drawer state. Persists across renders but not across
     // page reloads — that's a future v2 with localStorage.
@@ -308,6 +333,118 @@ public fun KashWorkspace(registry: CommandRegistry) {
         derivedStateOf { tabs.getOrNull(activeIndex) }
     }
 
+    // Apply a restored payload (from a saved snapshot OR an uploaded file)
+    // to the live VM. FS-only is non-destructive; a full restore touches
+    // interpreter slots, so we tear down every live shell first and spawn
+    // a fresh one whose restore-from-slot picks up the saved state. Shared
+    // by the Load-snapshot dialog and the Upload-snapshot file picker.
+    val applyPayload: (String, BrowserSnapshotStore.Payload) -> Unit = { label, payload ->
+        when (payload) {
+            is BrowserSnapshotStore.Payload.FsOnly -> {
+                statusMessage =
+                    if (workspace.restoreFsOnly(payload.snapshot)) {
+                        "Loaded FS from “$label”."
+                    } else {
+                        "Couldn't restore “$label” — snapshot is corrupt or incompatible."
+                    }
+            }
+
+            is BrowserSnapshotStore.Payload.Full -> {
+                for (t in tabs) t.runner.stop()
+                tabs.clear()
+                activeIndex = -1
+                val ok = workspace.restoreFull(payload.snapshot)
+                // Spawn a fresh shell either way: on failure the VM may be
+                // partially restored, but an empty terminal beats a blank
+                // screen, and the user gets a clear status message.
+                val tab = newTab(workspace, label = label, onExit = closeTab)
+                tabs.add(tab)
+                activeIndex = 0
+                nextShellNumber++
+                statusMessage =
+                    if (ok) "Restored “$label”." else "Restored “$label” with errors — snapshot may be incompatible."
+            }
+        }
+    }
+
+    // Carry out a (confirmed or trusted) KashFrame op against the live VM
+    // and reply to the host over the port. Recreated each recomposition so
+    // it always reads the current `workspace`.
+    val executeFrameRequest: (KashFrameRequest) -> Unit = { req ->
+        when (req) {
+            is KashFrameRequest.Restore -> {
+                applyPayload(req.name, req.payload)
+                kashFramePost("kashframe:ack", req.replyId, "")
+            }
+
+            is KashFrameRequest.Export -> {
+                val payload: BrowserSnapshotStore.Payload? =
+                    if (req.fsOnly) {
+                        workspace.takeFsSnapshot()?.let { BrowserSnapshotStore.Payload.FsOnly(it) }
+                    } else {
+                        workspace.takeFullSnapshot()?.let { BrowserSnapshotStore.Payload.Full(it) }
+                    }
+                if (payload == null) {
+                    kashFramePost("kashframe:error", req.replyId, "capture-failed")
+                    statusMessage = "Couldn't capture machine state for ${req.origin}."
+                } else {
+                    val text = BrowserSnapshotStore.encodeToFile("snapshot", payload)
+                    kashFramePost("kashframe:snapshot", req.replyId, text)
+                    statusMessage = "Sent snapshot to ${req.origin}."
+                }
+            }
+        }
+    }
+
+    // Install the KashFrame listener once, only when an allowlist exists.
+    // Callbacks fire on the main thread, so they set Compose state directly;
+    // restore/export are gated through `frameRequest` so they run in the
+    // composition (with a fresh `workspace`) rather than from the JS stack.
+    DisposableEffect(Unit) {
+        if (frameAllowed.isNotEmpty()) {
+            installKashFrame(
+                allowedCsv = frameAllowed.joinToString(","),
+                onConnect = { origin ->
+                    frameOrigin.value = origin
+                    kashFramePost("kashframe:ready", "", BuildConfig.VERSION)
+                    statusMessage = "Connected to $origin"
+                },
+                onMessage = { type, replyId, payload ->
+                    val origin = frameOrigin.value
+                    if (origin != null) {
+                        when (type) {
+                            "kashframe:configure" -> {
+                                val base = if (embedded) WorkspacePolicy.Embedded else WorkspacePolicy.Standalone
+                                val newPolicy = parseFramePolicy(payload, base)
+                                if (newPolicy == null) {
+                                    kashFramePost("kashframe:error", replyId, "invalid-config")
+                                } else {
+                                    pendingConfigure = PendingConfigure(newPolicy, replyId)
+                                }
+                            }
+
+                            "kashframe:load-snapshot" -> {
+                                val imported = BrowserSnapshotStore.decodeFromFile(payload)
+                                if (imported == null) {
+                                    kashFramePost("kashframe:error", replyId, "invalid-snapshot")
+                                } else {
+                                    frameRequest =
+                                        KashFrameRequest.Restore(origin, replyId, imported.name, imported.payload)
+                                }
+                            }
+
+                            "kashframe:request-snapshot" -> {
+                                frameRequest = KashFrameRequest.Export(origin, replyId, fsOnly = payload == "fs")
+                            }
+                            // Unknown verbs are ignored — forward-compatible.
+                        }
+                    }
+                },
+            )
+        }
+        onDispose { }
+    }
+
     MaterialTheme(colorScheme = WorkspaceColors) {
         Column(modifier = Modifier.fillMaxSize().background(WindowBackground)) {
             WorkspaceTopBar(
@@ -332,7 +469,7 @@ public fun KashWorkspace(registry: CommandRegistry) {
                         // page reload would resurrect the old machine
                         // the user just asked to throw away.
                         BrowserSnapshotStore.clearAutosave()
-                        workspace = KashWorkspaceVm(registry)
+                        workspace = KashWorkspaceVm(registryFactory, policy)
                         val tab = newTab(workspace, label = "shell-$nextShellNumber", onExit = closeTab)
                         nextShellNumber++
                         tabs.add(tab)
@@ -341,7 +478,6 @@ public fun KashWorkspace(registry: CommandRegistry) {
                     }
                 },
                 onSave = { chrome { saveDialog = true } },
-                onLoad = { chrome { loadDialog = true } },
                 onManage = { chrome { manageDialog = true } },
                 onAbout = { chrome { aboutDialog = true } },
                 onAiSetup = { chrome { aiSetupDialog = true } },
@@ -393,7 +529,10 @@ public fun KashWorkspace(registry: CommandRegistry) {
                                 // Stand down while a modal is open so the
                                 // dialog gets clicks, text selection, and keys.
                                 inputEnabled =
-                                    !(saveDialog || loadDialog || manageDialog || aboutDialog || aiSetupDialog),
+                                    !(
+                                        saveDialog || manageDialog || aboutDialog || aiSetupDialog ||
+                                            frameRequest != null
+                                    ),
                             )
                         }
                     } else {
@@ -428,9 +567,14 @@ public fun KashWorkspace(registry: CommandRegistry) {
                     saveDialog = false
                     val saved =
                         if (fsOnly) {
+                            val fsSnap = workspace.takeFsSnapshot()
+                            if (fsSnap == null) {
+                                statusMessage = "Could not capture the filesystem."
+                                return@SaveSnapshotDialog
+                            }
                             BrowserSnapshotStore.save(
                                 name,
-                                BrowserSnapshotStore.Payload.FsOnly(workspace.takeFsSnapshot()),
+                                BrowserSnapshotStore.Payload.FsOnly(fsSnap),
                             )
                         } else {
                             val machineSnap = workspace.takeFullSnapshot()
@@ -448,54 +592,66 @@ public fun KashWorkspace(registry: CommandRegistry) {
             )
         }
 
-        if (loadDialog) {
-            LoadSnapshotDialog(
-                onDismiss = { loadDialog = false },
-                onLoad = { meta ->
-                    loadDialog = false
-                    val payload = BrowserSnapshotStore.load(meta.name)
-                    if (payload == null) {
-                        statusMessage = "Failed to load “${meta.name}”."
-                        return@LoadSnapshotDialog
-                    }
-                    when (payload) {
-                        is BrowserSnapshotStore.Payload.FsOnly -> {
-                            // FS-only is non-destructive — live shells
-                            // continue running; they just see the new
-                            // file tree on next read.
-                            workspace.restoreFsOnly(payload.snapshot)
-                            statusMessage = "Loaded FS from “${meta.name}”."
-                        }
-
-                        is BrowserSnapshotStore.Payload.Full -> {
-                            // Full restore touches slots → we must
-                            // tear down all live shells first so they
-                            // don't double-write slots on exit.
-                            for (t in tabs) t.runner.stop()
-                            tabs.clear()
-                            activeIndex = -1
-                            workspace.restoreFull(payload.snapshot)
-                            // Spawn a fresh shell on the restored VM;
-                            // its restoreSlotIfPresent picks up the
-                            // saved interpreter state (cwd, aliases,
-                            // functions, vars, history).
-                            val tab = newTab(workspace, label = meta.name, onExit = closeTab)
-                            tabs.add(tab)
-                            activeIndex = 0
-                            nextShellNumber++
-                            statusMessage = "Restored “${meta.name}”."
-                        }
-                    }
-                },
-            )
-        }
-
         if (manageDialog) {
             ManageSnapshotsDialog(
                 onDismiss = { manageDialog = false },
+                onLoad = { meta ->
+                    manageDialog = false
+                    val payload = BrowserSnapshotStore.load(meta.name)
+                    if (payload == null) {
+                        statusMessage = "Failed to load “${meta.name}”."
+                    } else {
+                        applyPayload(meta.name, payload)
+                    }
+                },
+                onDownload = { meta ->
+                    val payload = BrowserSnapshotStore.load(meta.name)
+                    if (payload == null) {
+                        statusMessage = "Failed to read “${meta.name}”."
+                    } else {
+                        val text = BrowserSnapshotStore.encodeToFile(meta.name, payload)
+                        downloadBytes("${meta.name}.kash.json", text.encodeToByteArray())
+                        statusMessage = "Downloaded “${meta.name}.kash.json” (${formatBytes(text.length)})."
+                    }
+                },
+                onCopy = { meta ->
+                    val payload = BrowserSnapshotStore.load(meta.name)
+                    if (payload == null) {
+                        statusMessage = "Failed to read “${meta.name}”."
+                    } else {
+                        val text = BrowserSnapshotStore.encodeToFile(meta.name, payload)
+                        writeToClipboard(text)
+                        statusMessage = "Copied “${meta.name}” to clipboard (${formatBytes(text.length)})."
+                    }
+                },
                 onDelete = { meta ->
                     BrowserSnapshotStore.delete(meta.name)
                     statusMessage = "Deleted “${meta.name}”."
+                },
+                onUpload = {
+                    manageDialog = false
+                    // Native file picker → read text → decode → restore. The
+                    // FileReader callback runs back on the main thread, so
+                    // touching Compose state from it is safe.
+                    pickTextFile { text ->
+                        val imported = BrowserSnapshotStore.decodeFromFile(text)
+                        if (imported == null) {
+                            statusMessage = "Couldn't read that snapshot file."
+                        } else {
+                            applyPayload(imported.name, imported.payload)
+                        }
+                    }
+                },
+                onPaste = {
+                    manageDialog = false
+                    readClipboardText { text ->
+                        val imported = BrowserSnapshotStore.decodeFromFile(text)
+                        if (imported == null) {
+                            statusMessage = "No snapshot found on the clipboard."
+                        } else {
+                            applyPayload(imported.name, imported.payload)
+                        }
+                    }
                 },
             )
         }
@@ -506,6 +662,52 @@ public fun KashWorkspace(registry: CommandRegistry) {
 
         if (aiSetupDialog) {
             LmStudioSetupDialog(onDismiss = { aiSetupDialog = false })
+        }
+
+        // Host policy change — rebuild the VM with the new posture. Runs in
+        // a LaunchedEffect so it executes in the composition (fresh state),
+        // not from the JS port callback. Applied without a prompt: it's the
+        // host setting up its embed on a fresh, empty machine.
+        pendingConfigure?.let { pc ->
+            LaunchedEffect(pc) {
+                for (t in tabs) t.runner.stop()
+                tabs.clear()
+                activeIndex = -1
+                nextShellNumber = 1
+                policy = pc.policy
+                workspace = KashWorkspaceVm(registryFactory, pc.policy)
+                val tab = newTab(workspace, label = "shell-$nextShellNumber", onExit = closeTab)
+                nextShellNumber++
+                tabs.add(tab)
+                activeIndex = 0
+                kashFramePost("kashframe:ack", pc.replyId, "")
+                statusMessage = "Applied sandbox policy from ${frameOrigin.value ?: "host"}."
+                pendingConfigure = null
+            }
+        }
+
+        // KashFrame host request. Trusted origins act without a prompt
+        // (run in a LaunchedEffect so it executes in the composition);
+        // everyone else is confirm-gated.
+        frameRequest?.let { req ->
+            if (req.origin in frameTrusted) {
+                LaunchedEffect(req) {
+                    executeFrameRequest(req)
+                    frameRequest = null
+                }
+            } else {
+                KashFrameConfirmDialog(
+                    request = req,
+                    onConfirm = {
+                        executeFrameRequest(req)
+                        frameRequest = null
+                    },
+                    onDismiss = {
+                        kashFramePost("kashframe:error", req.replyId, "declined")
+                        frameRequest = null
+                    },
+                )
+            }
         }
     }
 }
@@ -642,6 +844,12 @@ private data class ShellTab(
     val runner: KashSessionRunner,
 )
 
+/** A host-supplied [WorkspacePolicy] awaiting application, with its reply id. */
+private data class PendingConfigure(
+    val policy: WorkspacePolicy,
+    val replyId: String,
+)
+
 private var nextTabId: Long = 1
 
 private fun newTab(
@@ -668,7 +876,6 @@ private fun WorkspaceTopBar(
     onNewShell: () -> Unit,
     onNewMachine: () -> Unit,
     onSave: () -> Unit,
-    onLoad: () -> Unit,
     onManage: () -> Unit,
     onAbout: () -> Unit,
     onAiSetup: () -> Unit,
@@ -735,20 +942,12 @@ private fun WorkspaceTopBar(
                     leadingIcon = { Icon(Icons.Default.Save, contentDescription = null) },
                 )
                 DropdownMenuItem(
-                    text = { Text("Load Snapshot…") },
-                    onClick = {
-                        fileMenuOpen = false
-                        onLoad()
-                    },
-                    leadingIcon = { Icon(Icons.Default.FolderOpen, contentDescription = null) },
-                )
-                DropdownMenuItem(
-                    text = { Text("Manage Snapshots…") },
+                    text = { Text("Snapshots…") },
                     onClick = {
                         fileMenuOpen = false
                         onManage()
                     },
-                    leadingIcon = { Icon(Icons.Default.Settings, contentDescription = null) },
+                    leadingIcon = { Icon(Icons.Default.FolderOpen, contentDescription = null) },
                 )
             }
         }
@@ -1409,6 +1608,49 @@ private fun EmptyState(onNewShell: () -> Unit) {
     }
 }
 
+/**
+ * Confirmation prompt for a KashFrame host request. An origin-validated
+ * message is authorization to *ask*, not to act — restore replaces the
+ * session, export hands the workspace to the host, so both need explicit
+ * consent (unless the origin is trusted, in which case this dialog is
+ * skipped entirely).
+ */
+@Composable
+@Suppress("ktlint:standard:function-naming")
+private fun KashFrameConfirmDialog(
+    request: KashFrameRequest,
+    onConfirm: () -> Unit,
+    onDismiss: () -> Unit,
+) {
+    val title: String
+    val body: String
+    val confirmText: String
+    when (request) {
+        is KashFrameRequest.Restore -> {
+            title = "Restore snapshot?"
+            body =
+                "“${request.origin}” wants to replace your current session with the snapshot " +
+                "“${request.name}”. Your current shells and files will be discarded."
+            confirmText = "Restore"
+        }
+
+        is KashFrameRequest.Export -> {
+            title = "Share snapshot?"
+            body =
+                "“${request.origin}” is requesting a copy of your current workspace " +
+                "(${if (request.fsOnly) "files only" else "full machine state"})."
+            confirmText = "Share"
+        }
+    }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text(title) },
+        text = { Text(body) },
+        confirmButton = { TextButton(onClick = onConfirm) { Text(confirmText) } },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
+    )
+}
+
 @Composable
 @Suppress("ktlint:standard:function-naming")
 private fun SaveSnapshotDialog(
@@ -1467,41 +1709,23 @@ private fun SaveSnapshotDialog(
     )
 }
 
-@Composable
-@Suppress("ktlint:standard:function-naming")
-private fun LoadSnapshotDialog(
-    onDismiss: () -> Unit,
-    onLoad: (BrowserSnapshotStore.SavedSnapshotMeta) -> Unit,
-) {
-    val entries = remember { BrowserSnapshotStore.list() }
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        title = { Text("Load snapshot") },
-        text = {
-            if (entries.isEmpty()) {
-                Text("No saved snapshots.", color = Color(0xFF8A8A8A))
-            } else {
-                LazyColumn(modifier = Modifier.heightIn(max = 360.dp)) {
-                    items(entries) { meta ->
-                        SnapshotRow(meta, onClick = { onLoad(meta) })
-                    }
-                }
-            }
-        },
-        confirmButton = {
-            TextButton(onClick = onDismiss) { Text("Close") }
-        },
-    )
-}
-
+/**
+ * The snapshot hub: import (Upload file / Paste), and a list of saved
+ * snapshots where clicking a row loads it and each row carries
+ * Download / Copy / Delete actions. Save itself stays in the File menu.
+ */
 @Composable
 @Suppress("ktlint:standard:function-naming")
 private fun ManageSnapshotsDialog(
     onDismiss: () -> Unit,
+    onLoad: (BrowserSnapshotStore.SavedSnapshotMeta) -> Unit,
+    onDownload: (BrowserSnapshotStore.SavedSnapshotMeta) -> Unit,
+    onCopy: (BrowserSnapshotStore.SavedSnapshotMeta) -> Unit,
     onDelete: (BrowserSnapshotStore.SavedSnapshotMeta) -> Unit,
+    onUpload: () -> Unit,
+    onPaste: () -> Unit,
 ) {
-    // Local state so the dialog refreshes after a delete without
-    // re-opening.
+    // Local copy so a delete refreshes the list without re-opening.
     val entries = remember { mutableStateListOf<BrowserSnapshotStore.SavedSnapshotMeta>() }
     LaunchedEffect(Unit) {
         entries.clear()
@@ -1509,29 +1733,78 @@ private fun ManageSnapshotsDialog(
     }
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text("Manage snapshots") },
+        title = { Text("Snapshots") },
         text = {
-            if (entries.isEmpty()) {
-                Text("No saved snapshots.", color = Color(0xFF8A8A8A))
-            } else {
-                LazyColumn(modifier = Modifier.heightIn(max = 360.dp)) {
-                    items(entries.toList()) { meta ->
-                        Row(
-                            verticalAlignment = Alignment.CenterVertically,
-                            modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
-                        ) {
-                            Column(modifier = Modifier.weight(1f)) {
-                                Text(meta.name, fontFamily = FontFamily.Monospace)
-                                Text(
-                                    "${kindLabel(meta.kind)} · ${formatBytes(meta.sizeBytes)}",
-                                    color = Color(0xFF8A8A8A),
-                                    style = MaterialTheme.typography.bodySmall,
-                                )
+            Column {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    TextButton(onClick = onUpload) {
+                        Icon(Icons.Default.Upload, contentDescription = null, modifier = Modifier.size(18.dp))
+                        Spacer(Modifier.size(6.dp))
+                        Text("Upload file…")
+                    }
+                    Spacer(Modifier.size(4.dp))
+                    TextButton(onClick = onPaste) {
+                        Icon(Icons.Default.ContentPaste, contentDescription = null, modifier = Modifier.size(18.dp))
+                        Spacer(Modifier.size(6.dp))
+                        Text("Paste")
+                    }
+                }
+                HorizontalDivider(color = Color(0xFF222222))
+                Spacer(Modifier.size(6.dp))
+                if (entries.isEmpty()) {
+                    Text(
+                        "No saved snapshots. Use File ▸ Save Snapshot, or import one above.",
+                        color = Color(0xFF8A8A8A),
+                        modifier = Modifier.padding(vertical = 8.dp),
+                    )
+                } else {
+                    Text(
+                        "Click a snapshot to load it.",
+                        color = Color(0xFF8A8A8A),
+                        style = MaterialTheme.typography.bodySmall,
+                    )
+                    Spacer(Modifier.size(4.dp))
+                    LazyColumn(modifier = Modifier.heightIn(max = 340.dp)) {
+                        items(entries.toList()) { meta ->
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                modifier = Modifier.fillMaxWidth(),
+                            ) {
+                                // Clickable load area.
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    modifier =
+                                        Modifier
+                                            .weight(1f)
+                                            .clickable { onLoad(meta) }
+                                            .padding(vertical = 8.dp),
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Default.History,
+                                        contentDescription = null,
+                                        tint = Color(0xFF8A8A8A),
+                                        modifier = Modifier.size(18.dp),
+                                    )
+                                    Spacer(Modifier.size(8.dp))
+                                    Column {
+                                        Text(meta.name, fontFamily = FontFamily.Monospace)
+                                        Text(
+                                            "${kindLabel(meta.kind)} · ${formatBytes(meta.sizeBytes)}",
+                                            color = Color(0xFF8A8A8A),
+                                            style = MaterialTheme.typography.bodySmall,
+                                        )
+                                    }
+                                }
+                                SnapshotRowAction(
+                                    Icons.Default.Download,
+                                    "Download “${meta.name}”",
+                                ) { onDownload(meta) }
+                                SnapshotRowAction(Icons.Default.ContentCopy, "Copy “${meta.name}”") { onCopy(meta) }
+                                SnapshotRowAction(Icons.Default.Delete, "Delete “${meta.name}”") {
+                                    onDelete(meta)
+                                    entries.remove(meta)
+                                }
                             }
-                            TextButton(onClick = {
-                                onDelete(meta)
-                                entries.remove(meta)
-                            }) { Text("Delete") }
                         }
                     }
                 }
@@ -1545,36 +1818,25 @@ private fun ManageSnapshotsDialog(
 
 @Composable
 @Suppress("ktlint:standard:function-naming")
-private fun SnapshotRow(
-    meta: BrowserSnapshotStore.SavedSnapshotMeta,
+private fun SnapshotRowAction(
+    icon: androidx.compose.ui.graphics.vector.ImageVector,
+    description: String,
     onClick: () -> Unit,
 ) {
-    Surface(
-        color = Color(0xFF1F1F1F),
-        contentColor = Color(0xFFEAEAEA),
-        modifier = Modifier.fillMaxWidth().padding(vertical = 2.dp),
-        onClick = onClick,
+    Box(
+        modifier =
+            Modifier
+                .size(32.dp)
+                .clickable { onClick() }
+                .focusProperties { canFocus = false },
+        contentAlignment = Alignment.Center,
     ) {
-        Row(
-            verticalAlignment = Alignment.CenterVertically,
-            modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
-        ) {
-            Icon(
-                imageVector = Icons.Default.History,
-                contentDescription = null,
-                tint = Color(0xFF8A8A8A),
-                modifier = Modifier.size(18.dp),
-            )
-            Spacer(Modifier.size(8.dp))
-            Column(modifier = Modifier.weight(1f)) {
-                Text(meta.name, fontFamily = FontFamily.Monospace)
-                Text(
-                    "${kindLabel(meta.kind)} · ${formatBytes(meta.sizeBytes)}",
-                    color = Color(0xFF8A8A8A),
-                    style = MaterialTheme.typography.bodySmall,
-                )
-            }
-        }
+        Icon(
+            imageVector = icon,
+            contentDescription = description,
+            tint = Color(0xFF9A9A9A),
+            modifier = Modifier.size(18.dp),
+        )
     }
 }
 

@@ -2,6 +2,8 @@ package com.accucodeai.kash
 
 import androidx.compose.ui.ExperimentalComposeUiApi
 import androidx.compose.ui.window.ComposeViewport
+import com.accucodeai.kash.api.CommandRegistry
+import com.accucodeai.kash.api.sandbox.NetworkPolicy
 import com.accucodeai.kash.app.standardRegistry
 import com.accucodeai.kash.ui.KashWorkspace
 import kotlinx.browser.document
@@ -19,8 +21,16 @@ import kotlinx.browser.document
  */
 @OptIn(ExperimentalComposeUiApi::class)
 public fun main() {
-    val registry = standardRegistry()
+    // Registries are network-policy-scoped (the policy is baked into the
+    // HTTP client used by curl/git/http). Memoize per policy so rebuilding
+    // the VM — New Machine, or a KashFrame host reconfiguring the embed —
+    // reuses the already-loaded Pyodide engine instead of constructing a
+    // fresh one each time. Standalone only ever needs the allow-all entry.
+    val registryCache = HashMap<NetworkPolicy, CommandRegistry>()
+    val registryFactory: (NetworkPolicy) -> CommandRegistry = { policy ->
+        registryCache.getOrPut(policy) { standardRegistry(networkPolicy = policy) }
+    }
     ComposeViewport(document.body!!) {
-        KashWorkspace(registry = registry)
+        KashWorkspace(registryFactory = registryFactory)
     }
 }

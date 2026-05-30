@@ -6,6 +6,7 @@ import com.accucodeai.kash.api.CommandKind
 import com.accucodeai.kash.api.CommandResult
 import com.accucodeai.kash.api.CommandSpec
 import com.accucodeai.kash.api.CommandTag
+import com.accucodeai.kash.api.ansi.Ansi
 import com.accucodeai.kash.api.io.writeLine
 import com.accucodeai.kash.api.io.writeUtf8
 import com.accucodeai.kash.fs.FileNotFound
@@ -347,7 +348,7 @@ internal fun renderFormat(
                 'n' -> sb.append('\n')
                 't' -> sb.append('\t')
                 'r' -> sb.append('\r')
-                '0' -> sb.append(' ')
+                '0' -> sb.append(Ansi.NUL)
                 '\\' -> sb.append('\\')
                 '"' -> sb.append('"')
                 else -> sb.append(c).append(fmt[i + 1])

@@ -28,7 +28,13 @@ public fun renderPrettyFormat(
     format: String,
     sha: String,
     commit: CommitPayload,
+    @Suppress("UNUSED_PARAMETER") abbrevLen: Int = 7,
+    decoration: String = "",
 ): String {
+    // %h/%t/%p always abbreviate to git's default (7) regardless of
+    // --abbrev-commit, which only affects the `commit <sha>` header line
+    // and `--oneline`. abbrevLen is accepted for call-site symmetry.
+    val shortLen = 7
     val sb = StringBuilder()
     var i = 0
     while (i < format.length) {
@@ -45,7 +51,16 @@ public fun renderPrettyFormat(
             }
 
             'h' -> {
-                sb.append(sha.substring(0, 7))
+                sb.append(sha.substring(0, shortLen))
+            }
+
+            'd' -> {
+                // Decoration with leading " (" + ")" wrapper, or empty.
+                if (decoration.isNotEmpty()) sb.append(" (").append(decoration).append(')')
+            }
+
+            'D' -> {
+                sb.append(decoration)
             }
 
             'T' -> {
@@ -53,7 +68,7 @@ public fun renderPrettyFormat(
             }
 
             't' -> {
-                sb.append(commit.tree.substring(0, 7))
+                sb.append(commit.tree.substring(0, shortLen))
             }
 
             'P' -> {
@@ -61,7 +76,7 @@ public fun renderPrettyFormat(
             }
 
             'p' -> {
-                sb.append(commit.parents.joinToString(" ") { it.substring(0, 7) })
+                sb.append(commit.parents.joinToString(" ") { it.substring(0, shortLen) })
             }
 
             's' -> {
@@ -260,3 +275,124 @@ public fun prettyPreset(name: String): String? =
             null
         }
     }
+
+/**
+ * Parse a `git log --since=/--until=` date argument to a unix-epoch
+ * second count. Supports the deterministic absolute forms scripts and
+ * differential tests can rely on:
+ *  - `@<unix-ts>` — explicit epoch seconds
+ *  - `YYYY-MM-DD`
+ *  - `YYYY-MM-DD HH:MM[:SS]` and `YYYY-MM-DDTHH:MM[:SS]`
+ *  - an optional trailing ` ±HHMM` / `±HH:MM` / `Z` zone (default UTC)
+ *
+ * Relative forms (`2 days ago`, `yesterday`, `3.weeks`) are resolved
+ * against [nowSeconds] when supplied; without a clock we can only do
+ * the common fixed-keyword/`N unit ago` cases. Returns null on anything
+ * we can't interpret (caller then ignores the bound, mirroring git's
+ * lenient "unparseable → no filter" leaning where practical).
+ */
+public fun parseGitDate(
+    raw: String,
+    nowSeconds: Long? = null,
+): Long? {
+    val s = raw.trim()
+    if (s.isEmpty()) return null
+    if (s.startsWith("@")) {
+        return s
+            .substring(1)
+            .trim()
+            .substringBefore(' ')
+            .toLongOrNull()
+    }
+
+    // Relative forms: "N <unit> ago", "yesterday", "now".
+    parseRelativeDate(s, nowSeconds)?.let { return it }
+
+    // Absolute: split off a trailing zone token if present.
+    var body = s
+    var tzOffsetSec = 0
+    val zoneMatch = Regex("""\s*(Z|[+-]\d{2}:?\d{2})$""").find(body)
+    if (zoneMatch != null) {
+        val z = zoneMatch.groupValues[1]
+        tzOffsetSec =
+            if (z == "Z") {
+                0
+            } else {
+                val sign = if (z[0] == '-') -1 else 1
+                val digits = z.substring(1).replace(":", "")
+                sign * (digits.substring(0, 2).toInt() * 3600 + digits.substring(2, 4).toInt() * 60)
+            }
+        body = body.substring(0, zoneMatch.range.first).trim()
+    }
+
+    val dateTime =
+        Regex("""^(\d{4})-(\d{2})-(\d{2})(?:[ T](\d{2}):(\d{2})(?::(\d{2}))?)?$""").find(body)
+            ?: return null
+    val g = dateTime.groupValues
+    val y = g[1].toInt()
+    val mo = g[2].toInt()
+    val d = g[3].toInt()
+    val hh = g[4].toIntOrNull() ?: 0
+    val mm = g[5].toIntOrNull() ?: 0
+    val ss = g[6].toIntOrNull() ?: 0
+    val days = epochDaysFromYmd(y, mo, d)
+    return days * 86400L + hh * 3600L + mm * 60L + ss - tzOffsetSec
+}
+
+private fun parseRelativeDate(
+    s: String,
+    nowSeconds: Long?,
+): Long? {
+    if (nowSeconds == null) return null
+    val lower = s.lowercase().trim()
+    if (lower == "now") return nowSeconds
+    if (lower == "yesterday") return nowSeconds - 86400L
+    val m =
+        Regex("""^(\d+)\s*(second|minute|hour|day|week|month|year)s?(?:\s+ago)?$""").find(lower)
+            ?: return null
+    val n = m.groupValues[1].toLong()
+    val unitSec =
+        when (m.groupValues[2]) {
+            "second" -> 1L
+
+            "minute" -> 60L
+
+            "hour" -> 3600L
+
+            "day" -> 86400L
+
+            "week" -> 604800L
+
+            "month" -> 2592000L
+
+            // 30 days, matching git's approx
+            "year" -> 31536000L
+
+            // 365 days
+            else -> return null
+        }
+    return nowSeconds - n * unitSec
+}
+
+/** Days since Unix epoch for a civil (y, m, d) date (Howard Hinnant). */
+private fun epochDaysFromYmd(
+    y: Int,
+    m: Int,
+    d: Int,
+): Long {
+    val yy = if (m <= 2) y - 1 else y
+    val era = (if (yy >= 0) yy else yy - 399) / 400
+    val yoe = (yy - era * 400).toLong()
+    val mp = if (m > 2) m - 3 else m + 9
+    val doy = (153 * mp + 2) / 5 + d - 1
+    val doe = yoe * 365 + yoe / 4 - yoe / 100 + doy
+    return era.toLong() * 146097L + doe - 719468L
+}
+
+/**
+ * Convert a person stamp's stored `whenSeconds` (already epoch UTC) to
+ * a UTC-comparable epoch second. git compares `--since`/`--until` against
+ * the committer date's absolute instant, so the stored epoch is what we
+ * compare — the tz string only affects display.
+ */
+internal fun commitInstant(whenSeconds: Long): Long = whenSeconds

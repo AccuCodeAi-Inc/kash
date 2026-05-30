@@ -10,6 +10,38 @@ import kotlin.test.assertEquals
 import kotlin.test.assertIs
 
 class BasicLineEditorTest {
+    // Regression: a colored prompt's ANSI escapes must count as ZERO display
+    // width in the editor's wrap/cursor simulation, matching what the grid
+    // renders. When they were counted as columns, the editor believed the
+    // line wrapped ~13 cols early (the escape byte count of a bold+green+reset
+    // prompt), and its redraw scrolled the screen on every keystroke near the
+    // right margin (visible in the agent tool, whose prompt is colored).
+    @Test
+    fun skipNonPrintingSkipsAnsiAndPromptMarkers() {
+        val esc = Char(0x1B)
+        val soh = Char(0x01)
+        val stx = Char(0x02)
+        val bel = Char(0x07)
+
+        // CSI SGR runs (ESC[…m) are consumed whole.
+        assertEquals(4, skipNonPrinting("$esc[1m", 0)) // ESC [ 1 m
+        assertEquals(5, skipNonPrinting("$esc[32m", 0)) // ESC [ 3 2 m
+        assertEquals(4, skipNonPrinting("$esc[0mX", 0)) // stops before the X
+
+        // readline \[ \] markers: opening SOH skips through the closing STX.
+        assertEquals(7, skipNonPrinting("$soh$esc[31m$stx", 0))
+
+        // A stray closing marker consumes just itself.
+        assertEquals(1, skipNonPrinting("${stx}X", 0))
+
+        // OSC … BEL (e.g. a window-title set) is consumed up to and incl. BEL.
+        val osc = "$esc]0;t$bel"
+        assertEquals(osc.length, skipNonPrinting(osc, 0))
+
+        // An unterminated CSI runs to end-of-text rather than leaking columns.
+        assertEquals(2, skipNonPrinting("$esc[", 0))
+    }
+
     private fun newEditor() = BasicLineEditor(FakeTerminalControl()) to FakeTerminalControl()
 
     private fun runEdit(

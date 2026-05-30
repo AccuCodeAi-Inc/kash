@@ -65,6 +65,37 @@ class SyntheticMaterializerTest {
         assertEquals("# hello\n", readme.stdoutUtf8())
     }
 
+    @Test fun seededRepoStatusIsCleanOnUntouchedWorkTree(
+        @TempDir tmp: File,
+    ) {
+        val fs = InMemoryFs()
+        val layout = RepoLayout("/home/user/repo")
+        runTest {
+            SyntheticMaterializer(layout, fs, identity).materialize(
+                GitRepoSeed.Synthetic(
+                    workTree =
+                        mapOf(
+                            "README.md" to "# hello\n".encodeToByteArray(),
+                            "src/config.json" to "{\n  \"name\": \"test\"\n}".encodeToByteArray(),
+                        ),
+                ),
+            )
+        }
+
+        // The materializer must write a `.git/index` matching HEAD — otherwise
+        // every tracked file reads as staged-for-deletion (`D `).
+        assertTrue(fs.exists("${layout.gitDir}/index"), "seed must write .git/index")
+
+        extractToDisk(fs, layout.workTree, tmp)
+        // Real git, on an untouched checkout, reports a clean tree.
+        val status = probe.run(listOf("status", "--porcelain"), tmp)
+        assertEquals(0, status.exitCode, status.stderrUtf8())
+        assertEquals("", status.stdoutUtf8(), "expected clean status, got:\n${status.stdoutUtf8()}")
+        // And nothing staged: the index equals HEAD.
+        val diffCached = probe.run(listOf("diff", "--cached", "--name-status"), tmp)
+        assertEquals("", diffCached.stdoutUtf8(), "expected nothing staged, got:\n${diffCached.stdoutUtf8()}")
+    }
+
     @Test fun linearHistoryProducesExpectedLog(
         @TempDir tmp: File,
     ) {

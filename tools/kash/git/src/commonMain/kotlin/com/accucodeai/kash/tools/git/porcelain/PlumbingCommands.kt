@@ -2,6 +2,7 @@ package com.accucodeai.kash.tools.git.porcelain
 
 import com.accucodeai.kash.api.CommandContext
 import com.accucodeai.kash.api.CommandResult
+import com.accucodeai.kash.api.ansi.Ansi
 import com.accucodeai.kash.api.io.readAllBytes
 import com.accucodeai.kash.api.io.writeUtf8
 import com.accucodeai.kash.tools.git.GitEnv
@@ -10,6 +11,7 @@ import com.accucodeai.kash.tools.git.plumbing.FileMode
 import com.accucodeai.kash.tools.git.plumbing.ObjectType
 import com.accucodeai.kash.tools.git.plumbing.framedObject
 import com.accucodeai.kash.tools.git.plumbing.parseFramedObject
+import kotlin.coroutines.cancellation.CancellationException
 
 /**
  * `git cat-file` — query loose objects.
@@ -56,6 +58,8 @@ public fun gitCatFileSubcommand(): GitSubcommand =
             val raw =
                 try {
                     repo.objects.read(sha)
+                } catch (ce: CancellationException) {
+                    throw ce
                 } catch (_: Throwable) {
                     ctx.stderr.writeUtf8("fatal: git cat-file: could not read $sha\n")
                     return CommandResult(exitCode = 128)
@@ -274,7 +278,7 @@ public fun gitLsTreeSubcommand(): GitSubcommand =
                     ctx.stderr.writeUtf8("fatal: Not a valid object name $treeish\n")
                     return CommandResult(exitCode = 128)
                 }
-            val term = if (nullTerm) " " else "\n"
+            val term = if (nullTerm) Ansi.NUL else "\n"
             emitTree(repo, treeSha, "", recurse, nameOnly, paths, term, ctx)
             return CommandResult(exitCode = 0)
         }
@@ -309,6 +313,8 @@ private suspend fun peelToTree(
     val raw =
         try {
             repo.objects.read(sha)
+        } catch (ce: CancellationException) {
+            throw ce
         } catch (_: Throwable) {
             return null
         }

@@ -19,21 +19,15 @@ import kotlin.test.assertTrue
 /**
  * Real-git differential for `git stash`.
  *
- * Important divergence from real git: real git stash uses a 2- or
- * 3-parent merge commit (parent[0] = HEAD, parent[1] = index tree,
- * parent[2] = untracked) and walks `refs/stash`'s reflog for
- * `git stash list`. Kash uses single-parent commits chained via
- * parent[1] (previous stash) so `list` walks parent links instead of
- * a reflog. That means:
+ * Kash now mirrors real git's stash shape: each stash is a `w`
+ * (worktree) commit with parents `[HEAD, i, (u)]` where `i` is the
+ * index-snapshot commit and `u` (optional) holds untracked files.
+ * Enumeration of `stash@{N}` is driven by the `refs/stash` reflog
+ * exactly as real git does, so `git stash list` against the resulting
+ * repo enumerates the same entries.
  *
- *  - Our `refs/stash` blob is still a valid commit object that real
- *    git's `cat-file`/`show`/`fsck` accept.
- *  - Real git's `git stash list` will NOT enumerate our stashes (it
- *    requires `logs/refs/stash` reflog entries, which we don't write).
- *
- * These tests verify the *parts that should be byte-compatible* — the
- * object DB is real-git-loadable — while documenting the `stash list`
- * divergence so it doesn't surprise future readers.
+ * These tests verify the object DB is real-git-loadable and that the
+ * reflog-driven enumeration matches.
  */
 class StashDifferentialTest {
     companion object {
@@ -146,23 +140,95 @@ class StashDifferentialTest {
         runBlocking { copyDir(fs, "/r", tmp) }
         assertEquals(0, probe.run(listOf("fsck", "--strict"), tmp).exitCode)
 
-        // Walk our stash chain via cat-file. The kash chain is
-        // newest→oldest via parent[1].
+        // refs/stash (stash@{0}) carries the most recent stash's content.
         val tip = probe.run(listOf("rev-parse", "refs/stash"), tmp).stdoutUtf8().trim()
         val tipBody = probe.run(listOf("cat-file", "-p", tip), tmp).stdoutUtf8()
-        // Tip carries the second stash's content.
         assertEquals(
             "second-wip\n",
             probe.run(listOf("show", "refs/stash:f"), tmp).stdoutUtf8(),
         )
-        // Tip has two parents: HEAD-at-stash + previous stash.
+        // Real-git shape: parent[0] = HEAD-at-stash, parent[1] = index commit.
         val parentLines = tipBody.lines().filter { it.startsWith("parent ") }
         assertEquals(2, parentLines.size, "stash tip should have 2 parents:\n$tipBody")
-        // The second parent's tree has the first stash's content.
-        val prevStash = parentLines[1].removePrefix("parent ")
+
+        // Real git enumerates BOTH stashes from our reflog, newest first.
+        val list = probe.run(listOf("stash", "list"), tmp).stdoutUtf8()
+        assertTrue("stash@{0}" in list && "stash@{1}" in list, "real git should list two stashes:\n$list")
+        // stash@{1}'s worktree tree carries the first stash's content.
         assertEquals(
             "first-wip\n",
-            probe.run(listOf("show", "$prevStash:f"), tmp).stdoutUtf8(),
+            probe.run(listOf("show", "stash@{1}:f"), tmp).stdoutUtf8(),
+        )
+    }
+
+    /**
+     * Drive the same scenario through real git and assert kash's
+     * user-visible `stash list` line matches modulo the short-sha and
+     * branch name (both of which differ because object SHAs and the
+     * default branch may differ between the two repos). We normalize the
+     * sha7 and branch to placeholders and compare the resulting shapes.
+     */
+    @Test fun listFormatMatchesRealGit(
+        @TempDir tmp: File,
+    ) {
+        fun normalize(line: String): String =
+            line
+                .replace(Regex(" [0-9a-f]{7} "), " <sha7> ")
+
+        // Real git.
+        val rg = probe.freshRepo("main")
+        File(rg, "a").writeText("base\n")
+        probe.run(listOf("add", "a"), rg)
+        probe.run(listOf("commit", "-q", "-m", "init"), rg)
+        File(rg, "a").writeText("wip\n")
+        probe.run(listOf("stash"), rg)
+        val rgList = probe.run(listOf("stash", "list"), rg).stdoutUtf8().trimEnd('\n')
+
+        // kash.
+        val fs = InMemoryFs()
+        fs.mkdirs("/r")
+        runGit(fs, "/r", "init", "-q", "-b", "main")
+        runBlocking { fs.writeBytes("/r/a", "base\n".encodeToByteArray()) }
+        runGit(fs, "/r", "add", "a")
+        runGit(fs, "/r", "commit", "-m", "init")
+        runBlocking { fs.writeBytes("/r/a", "wip\n".encodeToByteArray()) }
+        runGit(fs, "/r", "stash")
+        val kashList = runGit(fs, "/r", "stash", "list").second.trimEnd('\n')
+
+        assertEquals(normalize(rgList), normalize(kashList))
+    }
+
+    @Test fun dropMessageMatchesRealGitShape(
+        @TempDir tmp: File,
+    ) {
+        // Real git's drop message: "Dropped stash@{0} (<full-sha>)".
+        val rg = probe.freshRepo("main")
+        File(rg, "a").writeText("base\n")
+        probe.run(listOf("add", "a"), rg)
+        probe.run(listOf("commit", "-q", "-m", "init"), rg)
+        File(rg, "a").writeText("wip\n")
+        probe.run(listOf("stash"), rg)
+        val rgDrop = probe.run(listOf("stash", "drop"), rg).stdoutUtf8().trimEnd('\n')
+        // git 2.50 echoes the resolved ref ("refs/stash@{0}"); older
+        // versions print "stash@{0}". Accept either shape.
+        assertTrue(
+            Regex("""^Dropped (refs/)?stash@\{0} \([0-9a-f]{40}\)$""").matches(rgDrop),
+            "real git drop line: <$rgDrop>",
+        )
+
+        val fs = InMemoryFs()
+        fs.mkdirs("/r")
+        runGit(fs, "/r", "init", "-q", "-b", "main")
+        runBlocking { fs.writeBytes("/r/a", "base\n".encodeToByteArray()) }
+        runGit(fs, "/r", "add", "a")
+        runGit(fs, "/r", "commit", "-m", "init")
+        runBlocking { fs.writeBytes("/r/a", "wip\n".encodeToByteArray()) }
+        runGit(fs, "/r", "stash")
+        val kashDrop = runGit(fs, "/r", "stash", "drop").second.trimEnd('\n')
+        // kash uses the documented short spelling "stash@{0}".
+        assertTrue(
+            Regex("""^Dropped stash@\{0} \([0-9a-f]{40}\)$""").matches(kashDrop),
+            "kash drop line: <$kashDrop>",
         )
     }
 

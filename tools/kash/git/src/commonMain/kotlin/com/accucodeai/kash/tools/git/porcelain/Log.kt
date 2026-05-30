@@ -16,19 +16,26 @@ import kotlinx.datetime.toLocalDateTime
 import kotlin.time.Instant
 
 /**
- * `git log` — walk commit ancestry from HEAD (or a given revspec)
- * back to the root. v1 flags:
- *  - `--oneline`: `<short-sha> <message-subject>` per commit.
- *  - `--pretty=%s|%H|%h|%B`: format presets scripts love.
- *  - `-n <N>` / `--max-count=<N>`: limit output.
- *  - `-p` / `-u` / `--patch`: inline the patch (commit vs first parent).
- *  - `--stat` / `--shortstat`: per-file or summary line counts.
- *  - `<path>...`: trailing positional path filter; only commits that
- *    touched one of those paths are emitted (and patches are
- *    restricted to those paths).
+ * `git log` — walk commit ancestry from HEAD (or given revspecs) back to
+ * the root(s), emitting commits newest-first in git's default commit-date
+ * order.
  *
- * Topology: first-parent walk. Multi-parent merge handling and
- * `--graph` rendering still defer to a later milestone.
+ * History selection:
+ *  - multiple positional `<rev>`; `<a>..<b>` / `<a>...<b>` ranges;
+ *    `^<rev>` exclusions; `--all` / `--branches` / `--tags` / `--remotes`
+ *  - `--first-parent`, `--no-merges`, `--merges`
+ *
+ * Filtering:
+ *  - `--author=<p>` / `--committer=<p>` / `--grep=<p>` / `-i` /
+ *    `--all-match` / `--invert-grep`
+ *  - `--since`/`--after` / `--until`/`--before` (committer date)
+ *  - trailing `<path>...` path filter
+ *
+ * Output:
+ *  - `--oneline`, `--pretty=<fmt>` / `--format=<fmt>`, `--abbrev-commit`,
+ *    `--decorate[=short|full|no]`, `-p`/`--patch`, `--stat`,
+ *    `--shortstat`, `--name-only`, `--name-status`
+ *  - `-n <N>` / `--max-count`, `--skip=<N>`, `--reverse`, `--graph`
  */
 public fun gitLogSubcommand(): GitSubcommand =
     object : GitSubcommand {
@@ -46,14 +53,26 @@ public fun gitLogSubcommand(): GitSubcommand =
                         return CommandResult(exitCode = 128)
                     }
 
+            val nowSec =
+                ctx.process.machine.clock
+                    .now()
+                    .epochSeconds
+            val sel = WalkOptions()
+            val filters = CommitFilters()
+
             var oneline = false
             var pretty: String? = null
             var maxCount = Int.MAX_VALUE
-            var start: String? = null
+            var skip = 0
+            var reverse = false
             var patch = false
             var stat = false
             var shortStat = false
+            var nameOnly = false
+            var nameStatus = false
             var graph = false
+            var abbrevCommit = false
+            var decorate: String? = null // null = off; "short"/"full"
             val paths = mutableListOf<String>()
             var afterDoubleDash = false
 
@@ -68,11 +87,25 @@ public fun gitLogSubcommand(): GitSubcommand =
                 when {
                     a == "--oneline" -> {
                         oneline = true
+                        abbrevCommit = true
                         i++
                     }
 
                     a.startsWith("--pretty=") -> {
                         pretty = a.substringAfter("=")
+                        i++
+                    }
+
+                    a == "--pretty" -> {
+                        pretty = "medium"
+                        i++
+                    }
+
+                    a.startsWith("--format=") -> {
+                        // `--format=<x>` is an alias for `--pretty=<x>` but a
+                        // bare format string is treated as `format:<x>`.
+                        val v = a.substringAfter("=")
+                        pretty = if (prettyPreset(v) != null || v.startsWith("format:")) v else "format:$v"
                         i++
                     }
 
@@ -90,16 +123,16 @@ public fun gitLogSubcommand(): GitSubcommand =
                         i++
                     }
 
-                    // `-n42` shortcut for `-n 42`.
+                    a.startsWith("--skip=") -> {
+                        skip = a.substringAfter("=").toIntOrNull() ?: 0
+                        i++
+                    }
+
                     a.length > 2 && a.startsWith("-n") && a.substring(2).all(Char::isDigit) -> {
                         maxCount = a.substring(2).toInt()
                         i++
                     }
 
-                    // `-<N>` bare-count shorthand (e.g. `git log -5`).
-                    // Real git treats this as a synonym for `-n <N>`. Only
-                    // claims digit-only tails so we don't shadow `-p`, `-u`,
-                    // etc. above.
                     a.length > 1 && a[0] == '-' && a.substring(1).all(Char::isDigit) -> {
                         maxCount = a.substring(1).toInt()
                         i++
@@ -120,6 +153,151 @@ public fun gitLogSubcommand(): GitSubcommand =
                         i++
                     }
 
+                    a == "--name-only" -> {
+                        nameOnly = true
+                        i++
+                    }
+
+                    a == "--name-status" -> {
+                        nameStatus = true
+                        i++
+                    }
+
+                    a == "--abbrev-commit" -> {
+                        abbrevCommit = true
+                        i++
+                    }
+
+                    a == "--no-abbrev-commit" -> {
+                        abbrevCommit = false
+                        i++
+                    }
+
+                    a == "--decorate" -> {
+                        decorate = "short"
+                        i++
+                    }
+
+                    a.startsWith("--decorate=") -> {
+                        when (val v = a.substringAfter("=")) {
+                            "no" -> {
+                                decorate = null
+                            }
+
+                            "short", "full" -> {
+                                decorate = v
+                            }
+
+                            "auto" -> {
+                                decorate = null
+                            }
+
+                            // no tty in kash differential context
+                            else -> {
+                                ctx.stderr.writeUtf8("fatal: invalid --decorate option: '$v'\n")
+                                return CommandResult(exitCode = 128)
+                            }
+                        }
+                        i++
+                    }
+
+                    a == "--no-decorate" -> {
+                        decorate = null
+                        i++
+                    }
+
+                    a == "--reverse" -> {
+                        reverse = true
+                        i++
+                    }
+
+                    a == "--first-parent" -> {
+                        sel.firstParent = true
+                        i++
+                    }
+
+                    a == "--no-merges" -> {
+                        filters.noMerges = true
+                        i++
+                    }
+
+                    a == "--merges" -> {
+                        filters.mergesOnly = true
+                        i++
+                    }
+
+                    a == "--all" -> {
+                        addRefGlobInto(repo, "refs/heads", sel)
+                        addRefGlobInto(repo, "refs/remotes", sel)
+                        addRefGlobInto(repo, "refs/tags", sel)
+                        i++
+                    }
+
+                    a == "--branches" -> {
+                        addRefGlobInto(repo, "refs/heads", sel)
+                        i++
+                    }
+
+                    a == "--tags" -> {
+                        addRefGlobInto(repo, "refs/tags", sel)
+                        i++
+                    }
+
+                    a == "--remotes" -> {
+                        addRefGlobInto(repo, "refs/remotes", sel)
+                        i++
+                    }
+
+                    a.startsWith("--author=") -> {
+                        filters.authors += a.substringAfter("=")
+                        i++
+                    }
+
+                    a.startsWith("--committer=") -> {
+                        filters.committers += a.substringAfter("=")
+                        i++
+                    }
+
+                    a.startsWith("--grep=") -> {
+                        filters.greps += a.substringAfter("=")
+                        i++
+                    }
+
+                    a == "-i" || a == "--regexp-ignore-case" -> {
+                        filters.ignoreCase = true
+                        i++
+                    }
+
+                    a == "--all-match" -> {
+                        filters.allMatch = true
+                        i++
+                    }
+
+                    a == "--invert-grep" -> {
+                        filters.invertGrep = true
+                        i++
+                    }
+
+                    a.startsWith("--since=") || a.startsWith("--after=") -> {
+                        filters.since = parseGitDate(a.substringAfter("="), nowSec)
+                        i++
+                    }
+
+                    a.startsWith("--until=") || a.startsWith("--before=") -> {
+                        filters.until = parseGitDate(a.substringAfter("="), nowSec)
+                        i++
+                    }
+
+                    a == "--since" || a == "--after" || a == "--until" || a == "--before" -> {
+                        if (i + 1 >= args.size) {
+                            ctx.stderr.writeUtf8("error: switch \"$a\" requires a value\n")
+                            return CommandResult(exitCode = 129)
+                        }
+                        val v = parseGitDate(args[i + 1], nowSec)
+                        if (a == "--since" || a == "--after") filters.since = v else filters.until = v
+                        i += 2
+                    }
+
                     a == "--graph" -> {
                         graph = true
                         i++
@@ -130,16 +308,34 @@ public fun gitLogSubcommand(): GitSubcommand =
                         i++
                     }
 
+                    a.startsWith("^") -> {
+                        sel.excludes += a.substring(1)
+                        i++
+                    }
+
+                    a.contains("...") && !looksLikePath(ctx.fs, env.cwd, a) -> {
+                        val (lo, hi) = a.split("...", limit = 2)
+                        sel.symmetric += (lo.ifEmpty { "HEAD" }) to (hi.ifEmpty { "HEAD" })
+                        i++
+                    }
+
+                    a.contains("..") && !looksLikePath(ctx.fs, env.cwd, a) -> {
+                        val (lo, hi) = a.split("..", limit = 2)
+                        if (lo.isNotEmpty()) sel.excludes += lo
+                        sel.includes += hi.ifEmpty { "HEAD" }
+                        i++
+                    }
+
                     a.startsWith("-") -> {
                         ctx.stderr.writeUtf8("git log: unsupported option '$a'\n")
                         return CommandResult(exitCode = 129)
                     }
 
                     else -> {
-                        // First positional is the revspec; subsequent ones
-                        // are path filters (matches real git's grammar).
-                        if (start == null && !looksLikePath(ctx.fs, env.cwd, a)) {
-                            start = a
+                        // Positionals: revs until the first arg that looks
+                        // like an existing path; everything after is a path.
+                        if (paths.isEmpty() && !looksLikePath(ctx.fs, env.cwd, a)) {
+                            sel.includes += a
                         } else {
                             paths += a
                         }
@@ -148,85 +344,121 @@ public fun gitLogSubcommand(): GitSubcommand =
                 }
             }
 
-            val tip =
-                if (start == null) {
-                    repo.refs.resolveHead() ?: run {
-                        ctx.stderr.writeUtf8("fatal: your current branch does not have any commits yet\n")
-                        return CommandResult(exitCode = 128)
-                    }
-                } else {
-                    resolveRev(repo, start) ?: run {
-                        ctx.stderr.writeUtf8("fatal: ambiguous argument '$start'\n")
-                        return CommandResult(exitCode = 128)
-                    }
+            if (graph && sel.includes.isEmpty() && sel.excludes.isEmpty() && sel.symmetric.isEmpty()) {
+                // Preserve the existing graph rendering for the simple
+                // single-tip case (topo order from HEAD).
+                return renderGraph(repo, ctx, oneline, pretty, maxCount, paths)
+            }
+
+            // No explicit revs and no HEAD yet → match real git's
+            // "branch with no commits" message rather than the generic
+            // ambiguous-argument one.
+            if (sel.includes.isEmpty() && sel.excludes.isEmpty() && sel.symmetric.isEmpty() &&
+                repo.refs.resolveHead() == null
+            ) {
+                ctx.stderr.writeUtf8(
+                    "fatal: your current branch '${currentBranchName(repo)}' does not have any commits yet\n",
+                )
+                return CommandResult(exitCode = 128)
+            }
+
+            val walk =
+                computeWalk(repo, sel) {
+                    ctx.stderr.writeUtf8("fatal: ambiguous argument '$it'\n")
+                }
+                    ?: return CommandResult(exitCode = 128)
+
+            // Apply content filters, then path filter, then skip/limit.
+            var filtered =
+                walk.filter { (sha, c) ->
+                    filters.matches(c) && (paths.isEmpty() || commitTouchesAnyOf(repo, sha, paths))
+                }
+            if (skip > 0) filtered = filtered.drop(skip)
+            if (maxCount != Int.MAX_VALUE) filtered = filtered.take(maxCount)
+            if (reverse) filtered = filtered.reversed()
+
+            val abbrevLen = if (abbrevCommit) 7 else 40
+            // git auto-enables decoration when the format references %d/%D,
+            // even without an explicit --decorate.
+            val formatWantsDecoration =
+                pretty != null && (pretty.contains("%d") || pretty.contains("%D"))
+            val decorations =
+                when {
+                    decorate != null -> buildDecorations(repo, full = decorate == "full")
+                    formatWantsDecoration -> buildDecorations(repo, full = false)
+                    else -> emptyMap()
                 }
 
-            val walk: List<String> =
-                if (graph) {
-                    topoOrder(repo, tip)
-                } else {
-                    val list = mutableListOf<String>()
-                    var c: String? = tip
-                    while (c != null) {
-                        // Shallow clones (`git clone --depth=N`) only
-                        // have the last N commit objects locally — the
-                        // deepest commit's parent pointers reference
-                        // shas we don't have. Match real git: stop the
-                        // walk at the shallow boundary instead of
-                        // crashing the whole log command. Read first so
-                        // we don't add an unreadable sha to the list
-                        // (the render loop below would blow up on it).
-                        val commit =
-                            try {
-                                repo.objects.readCommit(c)
-                            } catch (_: Throwable) {
-                                break
-                            }
-                        list += c
-                        c = commit.parents.firstOrNull()
+            // Two independent layout rules git applies:
+            //  - betweenSeparator: a blank line between consecutive commits
+            //    (no trailing blank after the last). Used by the default
+            //    format and the named multi-line presets, NOT by user
+            //    `--format=`/`%…` strings or `--oneline`.
+            //  - precedingBlank: a blank line before a file/stat section.
+            //    Used for every non-oneline format; oneline glues it on.
+            val betweenSeparator =
+                !oneline &&
+                    when {
+                        pretty == null -> true
+                        pretty in setOf("short", "medium", "full", "fuller") -> true
+                        else -> false
                     }
-                    list
+            filtered.forEachIndexed { idx, (sha, commit) ->
+                val isLast = idx == filtered.lastIndex
+                renderCommit(sha, commit, oneline, pretty, abbrevLen, decorations[sha] ?: "", ctx)
+                val hasFileSection = stat || shortStat || nameStatus || nameOnly
+                if (hasFileSection) {
+                    if (!oneline) ctx.stdout.writeUtf8("\n")
+                    when {
+                        stat -> ctx.stdout.writeUtf8(renderStat(commitDiffStat(repo, sha, paths)))
+                        shortStat -> ctx.stdout.writeUtf8(renderShortStat(commitDiffStat(repo, sha, paths)))
+                        nameStatus -> ctx.stdout.writeUtf8(renderNameStatus(repo, sha, paths))
+                        nameOnly -> ctx.stdout.writeUtf8(renderNameOnly(repo, sha, paths))
+                    }
                 }
-            val graphRenderer = if (graph) GraphRenderer() else null
+                if (patch) {
+                    ctx.stdout.writeUtf8(commitDiffPatch(repo, sha, paths))
+                    ctx.stdout.writeUtf8("\n")
+                } else if (betweenSeparator && !isLast) {
+                    ctx.stdout.writeUtf8("\n")
+                }
+            }
+            return CommandResult(exitCode = 0)
+        }
+
+        private suspend fun renderGraph(
+            repo: GitRepo,
+            ctx: CommandContext,
+            oneline: Boolean,
+            pretty: String?,
+            maxCount: Int,
+            paths: List<String>,
+        ): CommandResult {
+            val tip =
+                repo.refs.resolveHead() ?: run {
+                    ctx.stderr.writeUtf8("fatal: your current branch does not have any commits yet\n")
+                    return CommandResult(exitCode = 128)
+                }
+            val order = topoOrder(repo, tip)
+            val graphRenderer = GraphRenderer()
             var emitted = 0
-            for (sha in walk) {
+            for (sha in order) {
                 if (emitted >= maxCount) break
                 val commit = repo.objects.readCommit(sha)
                 if (paths.isNotEmpty() && !commitTouchesAnyOf(repo, sha, paths)) {
-                    // Still advance the graph so future rows line up.
-                    if (graphRenderer != null) {
-                        graphRenderer.renderCommit(sha, commit.parents)
-                    }
+                    graphRenderer.renderCommit(sha, commit.parents)
                     continue
                 }
-                if (graphRenderer != null) {
-                    val rows = graphRenderer.renderCommit(sha, commit.parents)
-                    // First row is the commit row (prefixed to the rendered
-                    // commit lines); follow-ups (merge bar, lane collapse)
-                    // print on their own lines.
-                    val payload = renderCommitToString(sha, commit, oneline, pretty)
-                    val payloadLines = payload.trimEnd('\n').split('\n')
-                    val first = rows.firstOrNull() ?: "*"
-                    ctx.stdout.writeUtf8("$first ${payloadLines.firstOrNull() ?: ""}\n")
-                    val lanePrefix = first.replace('*', '|')
-                    for (line in payloadLines.drop(1)) {
-                        ctx.stdout.writeUtf8("$lanePrefix $line\n")
-                    }
-                    for (extra in rows.drop(1)) ctx.stdout.writeUtf8("$extra\n")
-                } else {
-                    renderCommit(sha, commit, oneline, pretty, ctx)
-                    if (stat) {
-                        ctx.stdout.writeUtf8(renderStat(commitDiffStat(repo, sha, paths)))
-                        if (!patch) ctx.stdout.writeUtf8("\n")
-                    } else if (shortStat) {
-                        ctx.stdout.writeUtf8(renderShortStat(commitDiffStat(repo, sha, paths)))
-                        if (!patch) ctx.stdout.writeUtf8("\n")
-                    }
-                    if (patch) {
-                        ctx.stdout.writeUtf8(commitDiffPatch(repo, sha, paths))
-                        ctx.stdout.writeUtf8("\n")
-                    }
+                val rows = graphRenderer.renderCommit(sha, commit.parents)
+                val payload = renderCommitToString(sha, commit, oneline, pretty)
+                val payloadLines = payload.trimEnd('\n').split('\n')
+                val first = rows.firstOrNull() ?: "*"
+                ctx.stdout.writeUtf8("$first ${payloadLines.firstOrNull() ?: ""}\n")
+                val lanePrefix = first.replace('*', '|')
+                for (line in payloadLines.drop(1)) {
+                    ctx.stdout.writeUtf8("$lanePrefix $line\n")
                 }
+                for (extra in rows.drop(1)) ctx.stdout.writeUtf8("$extra\n")
                 emitted++
             }
             return CommandResult(exitCode = 0)
@@ -238,14 +470,7 @@ public fun gitLogSubcommand(): GitSubcommand =
             oneline: Boolean,
             pretty: String?,
         ): String {
-            val format =
-                when {
-                    pretty == null -> null
-                    pretty.startsWith("format:") -> pretty.removePrefix("format:")
-                    prettyPreset(pretty) != null -> prettyPreset(pretty)
-                    pretty.startsWith("%") -> pretty
-                    else -> null
-                }
+            val format = resolveFormat(pretty)
             return when {
                 format != null -> {
                     renderPrettyFormat(format, sha, c).let {
@@ -258,22 +483,7 @@ public fun gitLogSubcommand(): GitSubcommand =
                 }
 
                 else -> {
-                    buildString {
-                        append("commit ").append(sha).append('\n')
-                        append("Author: ")
-                            .append(c.author.name)
-                            .append(" <")
-                            .append(c.author.email)
-                            .append(">\n")
-                        append("Date:   ")
-                            .append(gitDateFormat(c.author.whenSeconds, c.author.tz))
-                            .append('\n')
-                        append('\n')
-                        for (line in c.message.trimEnd('\n').split('\n')) {
-                            append("    ").append(line).append('\n')
-                        }
-                        append('\n')
-                    }
+                    defaultCommitBlock(sha, c, abbrevLen = 40, decoration = "")
                 }
             }
         }
@@ -283,11 +493,6 @@ public fun gitLogSubcommand(): GitSubcommand =
             cwd: String,
             arg: String,
         ): Boolean {
-            // Heuristic: a path is something that exists relative to cwd.
-            // We deliberately do NOT treat arbitrary `/`-containing args
-            // as paths — refspecs like `origin/main` or `refs/heads/x`
-            // contain slashes too. Real git uses `--` to disambiguate
-            // (honored via afterDoubleDash above).
             val candidate = if (cwd == "/") "/$arg" else "$cwd/$arg"
             return fs.exists(candidate)
         }
@@ -297,59 +502,166 @@ public fun gitLogSubcommand(): GitSubcommand =
             c: CommitPayload,
             oneline: Boolean,
             pretty: String?,
+            abbrevLen: Int,
+            decoration: String,
             ctx: CommandContext,
         ) {
-            // Resolve preset names (`--pretty=oneline`, `medium`, etc.) to
-            // the equivalent format strings; bare `--pretty=format:<x>`
-            // is the most common scripted form.
-            val format =
-                when {
-                    pretty == null -> null
-
-                    pretty.startsWith("format:") -> pretty.removePrefix("format:")
-
-                    prettyPreset(pretty) != null -> prettyPreset(pretty)
-
-                    // Single-placeholder shortcuts kept for back-compat with
-                    // tests that pass `--pretty=%s` etc.
-                    pretty.startsWith("%") -> pretty
-
-                    else -> null
-                }
+            val format = resolveFormat(pretty)
             when {
                 format != null -> {
-                    ctx.stdout.writeUtf8(renderPrettyFormat(format, sha, c))
+                    ctx.stdout.writeUtf8(renderPrettyFormat(format, sha, c, abbrevLen, decoration))
                     if (!format.endsWith("\n")) ctx.stdout.writeUtf8("\n")
                 }
 
                 oneline -> {
                     val subject = c.message.substringBefore('\n')
-                    ctx.stdout.writeUtf8("${sha.substring(0, 7)} $subject\n")
+                    val deco = if (decoration.isNotEmpty()) " ($decoration)" else ""
+                    ctx.stdout.writeUtf8("${sha.substring(0, abbrevLen)}$deco $subject\n")
                 }
 
                 else -> {
-                    ctx.stdout.writeUtf8("commit $sha\n")
-                    ctx.stdout.writeUtf8("Author: ${c.author.name} <${c.author.email}>\n")
-                    ctx.stdout.writeUtf8("Date:   ${gitDateFormat(c.author.whenSeconds, c.author.tz)}\n")
-                    ctx.stdout.writeUtf8("\n")
-                    for (line in c.message.trimEnd('\n').split('\n')) {
-                        ctx.stdout.writeUtf8("    $line\n")
-                    }
-                    ctx.stdout.writeUtf8("\n")
+                    ctx.stdout.writeUtf8(defaultCommitBlock(sha, c, abbrevLen, decoration))
                 }
             }
         }
+
+        private fun resolveFormat(pretty: String?): String? =
+            when {
+                pretty == null -> null
+
+                // `medium` is git's default format; render it via the
+                // hand-built block so empty-body commits don't pick up the
+                // preset string's spurious blank body line.
+                pretty == "medium" -> null
+
+                pretty.startsWith("format:") -> pretty.removePrefix("format:")
+
+                prettyPreset(pretty) != null -> prettyPreset(pretty)
+
+                pretty.startsWith("%") -> pretty
+
+                else -> null
+            }
+
+        private fun defaultCommitBlock(
+            sha: String,
+            c: CommitPayload,
+            abbrevLen: Int,
+            decoration: String,
+        ): String =
+            buildString {
+                append("commit ").append(sha.substring(0, abbrevLen))
+                if (decoration.isNotEmpty()) append(" (").append(decoration).append(')')
+                append('\n')
+                if (c.parents.size > 1) {
+                    append("Merge: ")
+                        .append(c.parents.joinToString(" ") { it.substring(0, 7) })
+                        .append('\n')
+                }
+                append("Author: ")
+                    .append(c.author.name)
+                    .append(" <")
+                    .append(c.author.email)
+                    .append(">\n")
+                append("Date:   ")
+                    .append(gitDateFormat(c.author.whenSeconds, c.author.tz))
+                    .append('\n')
+                append('\n')
+                for (line in c.message.trimEnd('\n').split('\n')) {
+                    append("    ").append(line).append('\n')
+                }
+                // No trailing blank: the caller inserts a single blank line
+                // between consecutive commits and none after the last.
+            }
     }
+
+private suspend fun currentBranchName(repo: GitRepo): String {
+    val head = repo.refs.readHead()
+    return (head as? com.accucodeai.kash.tools.git.plumbing.RefStore.Head.Symbolic)
+        ?.target
+        ?.removePrefix("refs/heads/")
+        ?: "HEAD"
+}
+
+private suspend fun addRefGlobInto(
+    repo: GitRepo,
+    prefix: String,
+    sel: WalkOptions,
+) {
+    for ((_, sha) in repo.refs.listRefs(prefix)) {
+        sel.includes += sha
+    }
+}
+
+/** `--name-only` body: one path per changed file (vs first parent). */
+private suspend fun renderNameOnly(
+    repo: GitRepo,
+    sha: String,
+    paths: List<String>,
+): String {
+    val sb = StringBuilder()
+    for ((path, _) in changedFiles(repo, sha, paths)) sb.append(path).append('\n')
+    return sb.toString()
+}
+
+/** `--name-status`: `<STATUS>\t<path>` per changed file (vs first parent). */
+private suspend fun renderNameStatus(
+    repo: GitRepo,
+    sha: String,
+    paths: List<String>,
+): String {
+    val sb = StringBuilder()
+    for ((path, status) in changedFiles(repo, sha, paths)) {
+        sb
+            .append(status)
+            .append('\t')
+            .append(path)
+            .append('\n')
+    }
+    return sb.toString()
+}
+
+/**
+ * Changed files between [commitSha] and its first parent (root commits
+ * diff against empty), as `(path, statusChar)` pairs sorted by path.
+ * Status chars: `A` added, `D` deleted, `M` modified.
+ */
+private suspend fun changedFiles(
+    repo: GitRepo,
+    commitSha: String,
+    pathFilter: List<String>,
+): List<Pair<String, Char>> {
+    val commit = repo.objects.readCommit(commitSha)
+    val newSide = flattenTree(repo, commit.tree)
+    val oldSide =
+        commit.parents.firstOrNull()?.let { p ->
+            flattenTree(repo, repo.objects.readCommit(p).tree)
+        } ?: emptyMap<String, FlatEntry>()
+    val out = mutableListOf<Pair<String, Char>>()
+    for (path in (oldSide.keys + newSide.keys).sorted()) {
+        if (!matchesPath(path, pathFilter)) continue
+        val l = oldSide[path]
+        val r = newSide[path]
+        when {
+            l == null && r != null -> {
+                out += path to 'A'
+            }
+
+            r == null && l != null -> {
+                out += path to 'D'
+            }
+
+            l != null && r != null -> {
+                if (!l.bytes.contentEquals(r.bytes) || l.mode != r.mode) out += path to 'M'
+            }
+        }
+    }
+    return out
+}
 
 /**
  * Format `epoch + tz-string` as real git's default `Date:` format:
  * `Day Mon DD HH:MM:SS YYYY ±HHMM` (e.g. `Thu Mar 21 14:32:09 2024 -0700`).
- * The tz offset is applied to the displayed wall-clock; the trailing
- * tz string is the original offset, unmodified.
- *
- * Falls back to the raw `<epoch> <tz>` form if anything's off (tz too
- * short, negative epoch beyond the era table) so we never emit a
- * malformed Date line.
  */
 internal fun gitDateFormat(
     epoch: Long,

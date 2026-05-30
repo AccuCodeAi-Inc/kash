@@ -1,10 +1,13 @@
-@file:OptIn(kotlin.js.ExperimentalWasmJsInterop::class)
+@file:OptIn(ExperimentalWasmJsInterop::class, ExperimentalSerializationApi::class)
 
 package com.accucodeai.kash.ui
 
 import com.accucodeai.kash.fs.MountedFsSnapshot
 import com.accucodeai.kash.snapshot.MachineSnapshot
+import com.accucodeai.kash.snapshot.SnapshotJson
 import kotlinx.browser.window
+import kotlinx.serialization.EncodeDefault
+import kotlinx.serialization.ExperimentalSerializationApi
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
 
@@ -32,11 +35,9 @@ public object BrowserSnapshotStore {
     private const val AUTOSAVE_DATA_KEY: String = "kash.autosave.data.v1"
     private const val AUTOSAVE_KIND_KEY: String = "kash.autosave.kind.v1"
 
-    private val json: Json =
-        Json {
-            ignoreUnknownKeys = true
-            encodeDefaults = true
-        }
+    // The one canonical snapshot codec — shared with the JVM store and the
+    // shell's slot read/write so FS and VM payloads round-trip identically.
+    private val json: Json = SnapshotJson
 
     @Serializable
     private data class Index(
@@ -63,6 +64,78 @@ public object BrowserSnapshotStore {
             val snapshot: MountedFsSnapshot,
         ) : Payload
     }
+
+    // ---- File import / export ------------------------------------------
+    //
+    // localStorage keys [Kind] separately from the payload; a downloaded
+    // file has no sidecar, so we wrap the snapshot in a self-describing
+    // envelope that carries its own kind + a format tag we can sanity-check
+    // on import. This is the on-disk shape the user gets when they
+    // "Download Snapshot…" and feeds back via "Upload Snapshot…".
+
+    private const val FILE_FORMAT: String = "kash-snapshot"
+    private const val FILE_VERSION: Int = 1
+
+    @Serializable
+    private data class SnapshotFile(
+        @EncodeDefault(EncodeDefault.Mode.ALWAYS)
+        val format: String = FILE_FORMAT,
+        @EncodeDefault(EncodeDefault.Mode.ALWAYS)
+        val version: Int = FILE_VERSION,
+        val kind: Kind,
+        val name: String = "snapshot",
+        val full: MachineSnapshot? = null,
+        val fsOnly: MountedFsSnapshot? = null,
+    )
+
+    /** A snapshot parsed from an uploaded file, with the name it was saved under. */
+    public data class ImportedSnapshot(
+        val name: String,
+        val payload: Payload,
+    )
+
+    /** Serialize [payload] to a self-describing JSON document for download. */
+    public fun encodeToFile(
+        name: String,
+        payload: Payload,
+    ): String =
+        when (payload) {
+            is Payload.Full -> {
+                json.encodeToString(
+                    SnapshotFile.serializer(),
+                    SnapshotFile(kind = Kind.FULL, name = name, full = payload.snapshot),
+                )
+            }
+
+            is Payload.FsOnly -> {
+                json.encodeToString(
+                    SnapshotFile.serializer(),
+                    SnapshotFile(kind = Kind.FS_ONLY, name = name, fsOnly = payload.snapshot),
+                )
+            }
+        }
+
+    /**
+     * Parse a downloaded snapshot file. Returns null if the text isn't a
+     * recognizable kash snapshot envelope (wrong format tag, corrupt JSON,
+     * or a kind whose payload field is missing).
+     */
+    public fun decodeFromFile(text: String): ImportedSnapshot? =
+        try {
+            val file = json.decodeFromString(SnapshotFile.serializer(), text)
+            if (file.format != FILE_FORMAT) {
+                null
+            } else {
+                val payload =
+                    when (file.kind) {
+                        Kind.FULL -> file.full?.let { Payload.Full(it) }
+                        Kind.FS_ONLY -> file.fsOnly?.let { Payload.FsOnly(it) }
+                    }
+                payload?.let { ImportedSnapshot(file.name, it) }
+            }
+        } catch (_: Throwable) {
+            null
+        }
 
     /** List all saved snapshots, newest first. */
     public fun list(): List<SavedSnapshotMeta> = readIndex().entries.sortedByDescending { it.savedAtMillis }

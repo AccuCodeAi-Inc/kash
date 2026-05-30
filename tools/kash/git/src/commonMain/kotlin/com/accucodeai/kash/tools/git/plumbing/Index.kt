@@ -124,6 +124,30 @@ public fun encodeIndex(file: IndexFile): ByteArray {
     return body + checksum
 }
 
+/**
+ * Build a fresh-checkout index from [flat] — one stage-0 entry per file,
+ * with `sha`/`size` matching the file's blob. This is the index a real
+ * `git clone` / `git checkout` leaves behind: it equals HEAD, so `git status`
+ * / `git diff` against an *untouched* working tree report clean.
+ *
+ * Stat fields (ctime/mtime/dev/ino/…) stay 0. kash's status compares the
+ * content sha (`blobSha(workTreeBytes)` vs the entry sha), not stat, so a
+ * pristine seed still reads as unmodified — see `porcelain/Status.kt`.
+ */
+public fun indexFromFlatTree(flat: FlatTree): IndexFile =
+    IndexFile(
+        version = 2,
+        entries =
+            flat.map { (path, file) ->
+                IndexEntry(
+                    mode = if (file.executable) FileMode.EXECUTABLE else FileMode.REGULAR,
+                    size = file.bytes.size,
+                    sha = blobSha(file.bytes),
+                    path = path,
+                )
+            },
+    )
+
 public fun decodeIndex(bytes: ByteArray): IndexFile {
     require(bytes.size >= 32) { "index too short: ${bytes.size} bytes" }
     val body = bytes.copyOfRange(0, bytes.size - 20)

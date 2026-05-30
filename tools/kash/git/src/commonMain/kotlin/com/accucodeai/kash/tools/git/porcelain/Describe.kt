@@ -5,6 +5,7 @@ import com.accucodeai.kash.api.CommandResult
 import com.accucodeai.kash.api.io.writeUtf8
 import com.accucodeai.kash.tools.git.GitEnv
 import com.accucodeai.kash.tools.git.GitRepo
+import kotlin.coroutines.cancellation.CancellationException
 
 /**
  * `git describe` — walk back from HEAD (or [rev]) until a tagged
@@ -121,6 +122,8 @@ public fun gitDescribeSubcommand(): GitSubcommand =
                             .readCommit(cur)
                             .parents
                             .firstOrNull()
+                    } catch (ce: CancellationException) {
+                        throw ce
                     } catch (_: Throwable) {
                         null
                     }
@@ -146,6 +149,8 @@ private suspend fun peelTagToCommit(
             try {
                 com.accucodeai.kash.tools.git.plumbing
                     .parseFramedObject(repo.objects.read(cur))
+            } catch (ce: CancellationException) {
+                throw ce
             } catch (_: Throwable) {
                 return null
             }

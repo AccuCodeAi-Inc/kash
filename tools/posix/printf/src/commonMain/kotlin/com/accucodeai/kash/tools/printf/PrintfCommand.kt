@@ -6,6 +6,7 @@ import com.accucodeai.kash.api.CommandKind
 import com.accucodeai.kash.api.CommandResult
 import com.accucodeai.kash.api.CommandSpec
 import com.accucodeai.kash.api.CommandTag
+import com.accucodeai.kash.api.ansi.Ansi
 import com.accucodeai.kash.api.io.writeUtf8
 import kotlin.math.abs
 import kotlin.math.pow
@@ -633,7 +634,7 @@ private fun decodeBEscapes(s: String): BEscapeResult {
                     p++
                 }
                 if (oct.isEmpty()) {
-                    sb.append('\u0000')
+                    sb.append(Ansi.NUL)
                     i += 2
                 } else {
                     sb.append(oct.toString().toInt(8).toChar())

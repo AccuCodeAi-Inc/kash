@@ -6,6 +6,7 @@ import com.accucodeai.kash.api.KashMachine
 import com.accucodeai.kash.api.KashProcess
 import com.accucodeai.kash.api.OpenFileDescription
 import com.accucodeai.kash.api.ProcessState
+import com.accucodeai.kash.api.ansi.Ansi
 import com.accucodeai.kash.api.io.SuspendSink
 import com.accucodeai.kash.api.io.SuspendSource
 import com.accucodeai.kash.api.io.asSuspendSource
@@ -545,7 +546,7 @@ public class ProcFs(
         // trailing NUL after the last arg. Scripts use
         // `tr '\0' ' ' </proc/$$/cmdline` for a human-readable form.
         return p.argv
-            .joinToString(separator = "\u0000", postfix = "\u0000")
+            .joinToString(separator = Ansi.NUL, postfix = Ansi.NUL)
             .encodeToByteArray()
     }
 
@@ -553,7 +554,7 @@ public class ProcFs(
         if (p.env.isEmpty()) return ByteArray(0)
         // Linux convention: NUL-separated KEY=VALUE pairs, trailing NUL.
         return p.env.entries
-            .joinToString(separator = "\u0000", postfix = "\u0000") { (k, v) -> "$k=$v" }
+            .joinToString(separator = Ansi.NUL, postfix = Ansi.NUL) { (k, v) -> "$k=$v" }
             .encodeToByteArray()
     }
 

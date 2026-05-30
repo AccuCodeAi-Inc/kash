@@ -734,6 +734,16 @@ internal fun writeToClipboard(text: String) {
 }
 
 /**
+ * Read the system clipboard as text and invoke [callback] with it (empty
+ * string on any failure). Exposed for the workspace's "Paste Snapshot from
+ * Clipboard" action, which feeds the text through
+ * [BrowserSnapshotStore.decodeFromFile].
+ */
+internal fun readClipboardText(callback: (String) -> Unit) {
+    jsReadClipboard { text -> callback(text) }
+}
+
+/**
  * Read the system clipboard asynchronously and invoke [callback] with the
  * text (empty string on any failure — no clipboard, permission denied,
  * unsupported MIME). The async-callback shape is necessary because

@@ -3,8 +3,11 @@
 package com.accucodeai.kash.ui
 
 import com.accucodeai.kash.Kash
+import com.accucodeai.kash.api.CommandKind
 import com.accucodeai.kash.api.CommandRegistry
 import com.accucodeai.kash.api.KashMachine
+import com.accucodeai.kash.api.sandbox.NetworkPolicy
+import com.accucodeai.kash.api.sandbox.SandboxPolicy
 import com.accucodeai.kash.fs.FileSystem
 import com.accucodeai.kash.fs.MountedFileSystem
 import com.accucodeai.kash.fs.MountedFsSnapshot
@@ -12,25 +15,57 @@ import com.accucodeai.kash.snapshot.MachineSnapshot
 import com.accucodeai.kash.snapshot.restoreFsAndSlots
 import com.accucodeai.kash.snapshot.snapshot as captureMachineSnapshot
 
-/**
- * The whole web app is one virtual machine: a single [Kash] / [KashMachine]
- * with one [MountedFileSystem], one process table, one `/proc`, one init.
- * Each shell tab is a [Kash.Session] (a sibling kash child of init) on this
+/*
+ * The whole web app is one virtual machine: a single Kash / KashMachine
+ * with one MountedFileSystem, one process table, one `/proc`, one init.
+ * Each shell tab is a Kash.Session (a sibling kash child of init) on this
  * VM, so files created in shell-A are visible from shell-B's `ls`, `kill`
  * from one shell signals processes in another, etc. POSIX "one box, many
  * ttys".
  *
  * Shared (workspace-wide) state lives here. Per-shell state — the
- * [ComposeTerminal], the cooked-byte stdin, the controlling session —
- * lives on [KashSessionRunner].
+ * ComposeTerminal, the cooked-byte stdin, the controlling session —
+ * lives on KashSessionRunner.
  */
-public class KashWorkspaceVm(
-    public val registry: CommandRegistry,
+
+/**
+ * Security posture for a workspace VM. Re-applied (the VM is rebuilt) when
+ * a KashFrame host configures the embed; not persisted in snapshots.
+ *
+ *  - [network] — outbound-network capability (baked into the HTTP client
+ *    AND the machine). [NetworkPolicy.None] is allow-all.
+ *  - [sandbox] — language-engine posture (e.g. GraalPy/Pyodide host-FS).
+ *  - [allowedCommands] — when non-null, the set of **tool** names that
+ *    remain usable; shell builtins/keywords are always kept so the shell
+ *    can't be bricked. `null` = all commands.
+ */
+public data class WorkspacePolicy(
+    val network: NetworkPolicy = NetworkPolicy.None,
+    val sandbox: SandboxPolicy = SandboxPolicy.TRUSTED,
+    val allowedCommands: Set<String>? = null,
 ) {
+    public companion object {
+        /** Standalone (first-party) default: full trust, allow-all. */
+        public val Standalone: WorkspacePolicy = WorkspacePolicy()
+
+        /** Embedded default: no network, hardest sandbox, all commands. */
+        public val Embedded: WorkspacePolicy =
+            WorkspacePolicy(network = NetworkPolicy.DenyAll, sandbox = SandboxPolicy.SAFE)
+    }
+}
+
+public class KashWorkspaceVm(
+    registryFactory: (NetworkPolicy) -> CommandRegistry,
+    public val policy: WorkspacePolicy = WorkspacePolicy.Standalone,
+) {
+    /** Effective catalog: the network-scoped base registry, tool-filtered by [policy]. */
+    public val registry: CommandRegistry = filterTools(registryFactory(policy.network), policy.allowedCommands)
+
     /**
      * The VM facade. Sessions are created via [kash]`.newSession(...)`.
      * Built with the browser-app's PS1/TERM/SHELL env defaults so every
-     * tab starts with the same baseline.
+     * tab starts with the same baseline, and with [policy]'s network +
+     * sandbox posture.
      */
     public val kash: Kash =
         Kash(
@@ -45,6 +80,8 @@ public class KashWorkspaceVm(
                     "TERM" to "kash-compose",
                     "PS1" to "$ ",
                 ),
+            networkPolicy = policy.network,
+            sandbox = policy.sandbox,
         )
 
     /** Compatibility passthroughs for callers that still want the raw VM. */
@@ -61,23 +98,41 @@ public class KashWorkspaceVm(
             null
         }
 
-    /** Workspace-wide FS-only snapshot. */
-    public fun takeFsSnapshot(): MountedFsSnapshot = fs.snapshot()
+    /** Workspace-wide FS-only snapshot, or null if capture fails. */
+    public fun takeFsSnapshot(): MountedFsSnapshot? =
+        try {
+            fs.snapshot()
+        } catch (_: Throwable) {
+            null
+        }
 
     /**
      * Apply a saved snapshot to this VM. **Destroys** any current shells'
      * slot state: caller must close all tabs first so their kash
      * processes exit cleanly before the snapshot's slots overwrite the
      * live slot map.
+     *
+     * Returns false (and leaves the VM in whatever partial state the
+     * restore reached) if the snapshot can't be applied — a corrupt or
+     * incompatible payload that decoded structurally but fails semantic
+     * rehydration. Never throws, so a bad snapshot can't crash the app.
      */
-    public fun restoreFull(snapshot: MachineSnapshot) {
-        machine.restoreFsAndSlots(snapshot)
-    }
+    public fun restoreFull(snapshot: MachineSnapshot): Boolean =
+        try {
+            machine.restoreFsAndSlots(snapshot)
+            true
+        } catch (_: Throwable) {
+            false
+        }
 
-    /** Apply an FS-only snapshot. Safe while shells are running. */
-    public fun restoreFsOnly(snapshot: MountedFsSnapshot) {
-        fs.restore(snapshot)
-    }
+    /** Apply an FS-only snapshot. Safe while shells are running. Never throws. */
+    public fun restoreFsOnly(snapshot: MountedFsSnapshot): Boolean =
+        try {
+            fs.restore(snapshot)
+            true
+        } catch (_: Throwable) {
+            false
+        }
 
     /**
      * Best-effort snapshot to the reserved autosave slot in
@@ -92,8 +147,24 @@ public class KashWorkspaceVm(
         if (full != null && BrowserSnapshotStore.saveAutosave(BrowserSnapshotStore.Payload.Full(full))) {
             return true
         }
-        return BrowserSnapshotStore.saveAutosave(BrowserSnapshotStore.Payload.FsOnly(takeFsSnapshot()))
+        val fsOnly = takeFsSnapshot() ?: return false
+        return BrowserSnapshotStore.saveAutosave(BrowserSnapshotStore.Payload.FsOnly(fsOnly))
     }
+}
+
+/**
+ * Restrict the usable command set to [allowed] (by canonical name), but
+ * only for [CommandKind.TOOL] entries — intrinsics, special builtins, and
+ * builtins (cd, export, control flow, …) are always kept so the shell stays
+ * operable. `null` leaves the registry untouched (all commands).
+ */
+private fun filterTools(
+    base: CommandRegistry,
+    allowed: Set<String>?,
+): CommandRegistry {
+    if (allowed == null) return base
+    val kept = base.specs.filter { it.kind != CommandKind.TOOL || it.name in allowed }
+    return CommandRegistry(kept.toList())
 }
 
 /**

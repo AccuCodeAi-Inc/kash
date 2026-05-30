@@ -5,6 +5,7 @@ import com.accucodeai.kash.api.CommandResult
 import com.accucodeai.kash.api.io.writeUtf8
 import com.accucodeai.kash.tools.git.GitEnv
 import com.accucodeai.kash.tools.git.GitRepo
+import kotlin.coroutines.cancellation.CancellationException
 
 /**
  * `git fetch [<remote>] [<branch>]` — ask the host's ref resolver for
@@ -85,6 +86,8 @@ public fun gitFetchSubcommand(): GitSubcommand =
                     val fetched =
                         try {
                             refResolver.fetchFromUrl(originUrl, refs, effectivePolicy, scope)
+                        } catch (ce: CancellationException) {
+                            throw ce
                         } catch (t: Throwable) {
                             ctx.stderr.writeUtf8(
                                 "fatal: unable to fetch from '$originUrl'\n" +

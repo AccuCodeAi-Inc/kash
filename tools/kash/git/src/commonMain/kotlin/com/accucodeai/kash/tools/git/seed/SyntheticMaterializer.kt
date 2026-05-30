@@ -14,6 +14,8 @@ import com.accucodeai.kash.tools.git.plumbing.PersonStamp
 import com.accucodeai.kash.tools.git.plumbing.RefStore
 import com.accucodeai.kash.tools.git.plumbing.RepoLayout
 import com.accucodeai.kash.tools.git.plumbing.encodeCommit
+import com.accucodeai.kash.tools.git.plumbing.encodeIndex
+import com.accucodeai.kash.tools.git.plumbing.indexFromFlatTree
 
 /**
  * Materialize a [GitRepoSeed.Synthetic] into a real-looking `.git/` plus
@@ -128,6 +130,12 @@ public class SyntheticMaterializer(
         val headTreeFlat: FlatTree =
             if (isSingleSnapshot) seedFlat else inferFlatFromStore(store, treeShaByTag.getValue(tipTag))
         materializeWorkTree(headTreeFlat)
+
+        // 3b. Write the index to match HEAD. A freshly checked-out repo has an
+        //     index equal to HEAD, so `git status`/`git diff` on the untouched
+        //     work tree report clean. Without this, every tracked file reads as
+        //     staged-for-deletion (HEAD has it, the index doesn't).
+        fs.writeBytes(layout.indexFile, encodeIndex(indexFromFlatTree(headTreeFlat)))
 
         // 4. .git/config, hooks, description, info/exclude.
         writeRepoMetadata(seed, identity)

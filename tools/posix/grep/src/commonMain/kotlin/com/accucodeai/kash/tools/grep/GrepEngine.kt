@@ -2,6 +2,8 @@ package com.accucodeai.kash.tools.grep
 
 import com.accucodeai.kash.api.ansi.ColorMode
 import com.accucodeai.kash.shared.regex.LinearRegex
+import com.accucodeai.kash.shared.regex.breToEre
+import com.accucodeai.kash.shared.regex.escapeLiteral
 
 /** Which regex dialect the patterns use. */
 internal enum class GrepMode { BRE, ERE, FIXED }

@@ -82,6 +82,14 @@ public object Ansi {
     public enum class Stream { STDOUT, STDERR }
 
     /**
+     * ASCII NUL (0x00) — the record terminator for `-z` / `--null` output
+     * modes (git status/diff, find -print0, xargs -0). Use this instead of
+     * a raw `" "` so the intent is obvious and it can't be mistaken for a
+     * stray space at the call site.
+     */
+    public const val NUL: String = "\u0000"
+
+    /**
      * Control-Sequence Introducer (`\u001B[`) — the universal prefix
      * for VT100/xterm CSI escapes. Use this and the helpers below
      * instead of writing raw `\u001B[` strings inline; both keeps

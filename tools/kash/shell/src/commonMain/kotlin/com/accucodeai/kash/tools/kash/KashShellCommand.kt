@@ -13,15 +13,14 @@ import com.accucodeai.kash.api.io.readUtf8LineOrNull
 import com.accucodeai.kash.api.io.writeUtf8
 import com.accucodeai.kash.api.terminal.LineEditor
 import com.accucodeai.kash.api.terminal.LineEditorResult
-import com.accucodeai.kash.ast.Script
 import com.accucodeai.kash.completion.ShellCompleter
 import com.accucodeai.kash.interpreter.Interpreter
 import com.accucodeai.kash.interpreter.notifyCompletedBackgroundJobs
 import com.accucodeai.kash.parser.ParseResult
 import com.accucodeai.kash.parser.Parser
 import com.accucodeai.kash.snapshot.InterpreterSnapshot
+import com.accucodeai.kash.snapshot.SnapshotJson
 import kotlinx.coroutines.currentCoroutineContext
-import kotlinx.serialization.json.Json
 
 /**
  * The shell itself, modeled as a [Command]. Registered in the default
@@ -354,7 +353,7 @@ public class KashShellCommand :
         val slot = proc.machine.snapshotSlots[proc.pid] ?: return
         val snap =
             try {
-                Json.decodeFromJsonElement(InterpreterSnapshot.serializer(), slot)
+                SnapshotJson.decodeFromJsonElement(InterpreterSnapshot.serializer(), slot)
             } catch (_: Throwable) {
                 return
             }
@@ -386,7 +385,7 @@ public class KashShellCommand :
         try {
             val snap = interp.snapshot()
             proc.machine.snapshotSlots[proc.pid] =
-                Json.encodeToJsonElement(InterpreterSnapshot.serializer(), snap)
+                SnapshotJson.encodeToJsonElement(InterpreterSnapshot.serializer(), snap)
         } catch (_: Throwable) {
             // Snapshot may fail if the FS isn't an InMemoryFs (the
             // Interpreter.snapshot() contract requires one). Skip silently

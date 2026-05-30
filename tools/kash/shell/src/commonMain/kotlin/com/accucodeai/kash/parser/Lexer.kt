@@ -1,5 +1,7 @@
 package com.accucodeai.kash.parser
 
+import com.accucodeai.kash.api.ansi.Ansi
+
 /**
  * Hand-rolled bash lexer.
  *
@@ -5159,7 +5161,7 @@ internal class Lexer(
                         val hex = source.substring(hexStart, pos)
                         if (pos < source.length && source[pos] == '}') pos++
                         if (hex.isEmpty()) {
-                            sb.append(' ')
+                            sb.append(Ansi.NUL)
                         } else {
                             val v = hex.toLong(16)
                             if (v in 0L..0x10FFFFL) {

@@ -192,17 +192,34 @@ public class BasicLineEditor(
             // happened yet — the cursor stays latched at the previous
             // row's right margin (`cols - 1`) until the next char
             // forces it. xterm and the wasmJs grid both implement this.
+            //
+            // Non-printing sequences contribute ZERO width, matching what
+            // the terminal actually renders: ANSI escape sequences (a
+            // colored prompt's `ESC[…m` SGR codes are consumed as
+            // zero-cell color changes) and `\[`/`\]` readline markers
+            // (encoded as `\001`/`\002`). Counting these as visible columns
+            // — as a naive per-char walk would — makes the editor believe
+            // the line wrapped ~N columns before the grid actually does
+            // (N = the escape byte count, ~13 for bold+green+reset), so the
+            // redraw's cursor-up/erase math drifts and the screen scrolls on
+            // every keystroke near the right margin. See [skipNonPrinting].
             fun simulateTermPos(
                 text: CharSequence,
                 cols: Int,
             ): Pair<Int, Int> {
                 var row = 0
                 var col = 0
-                for (i in text.indices) {
+                var i = 0
+                while (i < text.length) {
                     val ch = text[i]
+                    if (ch == '\u001B' || ch == '\u0001' || ch == '\u0002') {
+                        i = skipNonPrinting(text, i)
+                        continue
+                    }
                     if (ch == '\n') {
                         row++
                         col = 0
+                        i++
                         continue
                     }
                     val w = charWidth(ch)
@@ -211,6 +228,7 @@ public class BasicLineEditor(
                         col = 0
                     }
                     col += w
+                    i++
                 }
                 return if (col >= cols && text.isNotEmpty()) row to (cols - 1) else row to col
             }
@@ -696,4 +714,86 @@ public class BasicLineEditor(
             val low = (((cp - 0x10000) and 0x3FF) + 0xDC00).toChar()
             "$high$low"
         }
+}
+
+/**
+ * Advance past a non-printing run beginning at `text[start]`, returning the
+ * index of the first character after it. Mirrors what the terminal renders
+ * as zero width so [BasicLineEditor]'s column accounting matches the screen:
+ *
+ *  - SOH / STX (readline's `\[` / `\]` prompt markers): skip the marker,
+ *    and for an opening SOH skip through the closing STX.
+ *  - ESC sequences: CSI (`ESC [` … final byte `0x40..0x7E`), OSC (`ESC ]` …
+ *    `BEL` or the `ESC \` string terminator), and any other two-byte
+ *    `ESC x` form.
+ *
+ * An unterminated sequence consumes to end-of-text — the right call for a
+ * prompt that forgot to close a region, better than counting its bytes as
+ * visible columns. Codes are compared numerically to avoid embedding raw
+ * control characters in the source.
+ */
+internal fun skipNonPrinting(
+    text: CharSequence,
+    start: Int,
+): Int {
+    val esc = 0x1B
+    val soh = 0x01
+    val stx = 0x02
+    val bel = 0x07
+    var i = start
+    return when (text[i].code) {
+        soh -> {
+            i++ // past the opening marker
+            while (i < text.length && text[i].code != stx) i++
+            if (i < text.length) i + 1 else i // consume the closing marker
+        }
+
+        stx -> {
+            i + 1
+        }
+
+        // stray closing marker
+
+        esc -> {
+            i++ // past ESC
+            if (i >= text.length) {
+                i
+            } else {
+                when (text[i]) {
+                    '[' -> {
+                        // CSI: parameter / intermediate bytes until a final.
+                        i++
+                        while (i < text.length && text[i].code !in 0x40..0x7E) i++
+                        if (i < text.length) i + 1 else i
+                    }
+
+                    ']' -> {
+                        // OSC: until BEL or the ESC \ string terminator.
+                        i++
+                        var end = i
+                        while (end < text.length) {
+                            if (text[end].code == bel) {
+                                end++
+                                break
+                            }
+                            if (text[end].code == esc && end + 1 < text.length && text[end + 1] == '\\') {
+                                end += 2
+                                break
+                            }
+                            end++
+                        }
+                        end
+                    }
+
+                    else -> {
+                        i + 1
+                    } // two-byte ESC x
+                }
+            }
+        }
+
+        else -> {
+            i + 1
+        }
+    }
 }

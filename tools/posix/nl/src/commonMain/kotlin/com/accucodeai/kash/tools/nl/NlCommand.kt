@@ -12,6 +12,7 @@ import com.accucodeai.kash.api.io.writeLine
 import com.accucodeai.kash.api.io.writeUtf8
 import com.accucodeai.kash.fs.Paths
 import com.accucodeai.kash.shared.regex.LinearRegex
+import com.accucodeai.kash.shared.regex.breToEre
 
 /**
  * `nl` — POSIX line numbering filter.

@@ -399,6 +399,52 @@ internal fun downloadBytes(
     jsDownloadBytes(fileName, sb.toString())
 }
 
+/**
+ * Open the browser's native file picker and read the chosen file as UTF-8
+ * text, handing the contents to [onText]. Used by "Upload Snapshot…" to
+ * import a snapshot `.json` the user previously downloaded. No-op (callback
+ * never fires) if the user cancels the picker or the read errors.
+ *
+ * Snapshots are UTF-8 JSON, so `FileReader.readAsText` is the right read —
+ * no need for the one-byte-per-char binary-string bridge the drop/download
+ * paths use for opaque bytes.
+ */
+internal fun pickTextFile(onText: (String) -> Unit) {
+    jsPickTextFile(onText)
+}
+
+private fun jsPickTextFile(onText: (String) -> Unit): Unit =
+    js(
+        """{
+            try {
+                var input = document.createElement('input');
+                input.type = 'file';
+                input.accept = '.json,application/json';
+                input.style.display = 'none';
+                input.onchange = function () {
+                    try {
+                        var f = input.files && input.files[0];
+                        if (!f) return;
+                        var reader = new FileReader();
+                        reader.onload = function () {
+                            try { onText(String(reader.result)); } catch (_) { /* nothing */ }
+                        };
+                        reader.onerror = function () { /* nothing */ };
+                        reader.readAsText(f);
+                    } catch (_) { /* nothing */ }
+                };
+                document.body.appendChild(input);
+                input.click();
+                // Remove on the next tick — the click dispatches synchronously
+                // but the change event fires later; the detached input still
+                // works once it has been clicked.
+                setTimeout(function () {
+                    try { document.body.removeChild(input); } catch (_) { /* nothing */ }
+                }, 0);
+            } catch (_) { /* nothing */ }
+        }""",
+    )
+
 private fun jsDownloadBytes(
     name: String,
     binaryString: String,

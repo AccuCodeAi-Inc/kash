@@ -31,7 +31,7 @@ import kotlin.test.assertTrue
  *    rehydrates sessions and `nextPid`.
  */
 class MachineSnapshotRoundtripTest {
-    private val json: Json = Json { encodeDefaults = true }
+    private val json: Json = SnapshotJson
 
     private fun bootMachine(): KashMachine {
         val inMem = InMemoryFs()

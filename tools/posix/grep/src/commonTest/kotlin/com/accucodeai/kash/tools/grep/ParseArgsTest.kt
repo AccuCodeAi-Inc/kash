@@ -1,5 +1,7 @@
 package com.accucodeai.kash.tools.grep
 
+import com.accucodeai.kash.shared.regex.breToEre
+import com.accucodeai.kash.shared.regex.escapeLiteral
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith

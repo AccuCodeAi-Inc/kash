@@ -6,6 +6,7 @@ import com.accucodeai.kash.api.CommandKind
 import com.accucodeai.kash.api.CommandResult
 import com.accucodeai.kash.api.CommandSpec
 import com.accucodeai.kash.api.CommandTag
+import com.accucodeai.kash.api.ansi.Ansi
 import com.accucodeai.kash.api.io.writeUtf8
 import com.accucodeai.kash.api.util.matchGlob
 import com.accucodeai.kash.fs.DirWalkGuard
@@ -211,7 +212,7 @@ public class DuCommand :
         ctx: CommandContext,
         mtime: Long,
     ) {
-        val terminator = if (opts.nullTerm) " " else "\n"
+        val terminator = if (opts.nullTerm) Ansi.NUL else "\n"
         val value =
             when {
                 opts.human -> humanReadable(if (opts.byteUnit) amount else amount * opts.blockSize)

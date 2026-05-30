@@ -15,19 +15,25 @@ import com.accucodeai.kash.tools.git.porcelain.gitBranchSubcommand
 import com.accucodeai.kash.tools.git.porcelain.gitCatFileSubcommand
 import com.accucodeai.kash.tools.git.porcelain.gitCheckoutSubcommand
 import com.accucodeai.kash.tools.git.porcelain.gitCherryPickSubcommand
+import com.accucodeai.kash.tools.git.porcelain.gitCherrySubcommand
 import com.accucodeai.kash.tools.git.porcelain.gitCleanSubcommand
 import com.accucodeai.kash.tools.git.porcelain.gitCloneSubcommand
 import com.accucodeai.kash.tools.git.porcelain.gitCommitSubcommand
+import com.accucodeai.kash.tools.git.porcelain.gitCommitTreeSubcommand
 import com.accucodeai.kash.tools.git.porcelain.gitConfigSubcommand
 import com.accucodeai.kash.tools.git.porcelain.gitDescribeSubcommand
 import com.accucodeai.kash.tools.git.porcelain.gitDiffSubcommand
+import com.accucodeai.kash.tools.git.porcelain.gitDiffTreeSubcommand
 import com.accucodeai.kash.tools.git.porcelain.gitFetchSubcommand
+import com.accucodeai.kash.tools.git.porcelain.gitForEachRefSubcommand
+import com.accucodeai.kash.tools.git.porcelain.gitGrepSubcommand
 import com.accucodeai.kash.tools.git.porcelain.gitHashObjectSubcommand
 import com.accucodeai.kash.tools.git.porcelain.gitInitSubcommand
 import com.accucodeai.kash.tools.git.porcelain.gitLogSubcommand
 import com.accucodeai.kash.tools.git.porcelain.gitLsFilesSubcommand
 import com.accucodeai.kash.tools.git.porcelain.gitLsTreeSubcommand
 import com.accucodeai.kash.tools.git.porcelain.gitMergeSubcommand
+import com.accucodeai.kash.tools.git.porcelain.gitMktreeSubcommand
 import com.accucodeai.kash.tools.git.porcelain.gitMvSubcommand
 import com.accucodeai.kash.tools.git.porcelain.gitPullSubcommand
 import com.accucodeai.kash.tools.git.porcelain.gitPushSubcommand
@@ -40,11 +46,18 @@ import com.accucodeai.kash.tools.git.porcelain.gitRevListSubcommand
 import com.accucodeai.kash.tools.git.porcelain.gitRevParseSubcommand
 import com.accucodeai.kash.tools.git.porcelain.gitRevertSubcommand
 import com.accucodeai.kash.tools.git.porcelain.gitRmSubcommand
+import com.accucodeai.kash.tools.git.porcelain.gitShortlogSubcommand
+import com.accucodeai.kash.tools.git.porcelain.gitShowRefSubcommand
 import com.accucodeai.kash.tools.git.porcelain.gitShowSubcommand
 import com.accucodeai.kash.tools.git.porcelain.gitStashSubcommand
 import com.accucodeai.kash.tools.git.porcelain.gitStatusSubcommand
 import com.accucodeai.kash.tools.git.porcelain.gitSwitchSubcommand
+import com.accucodeai.kash.tools.git.porcelain.gitSymbolicRefSubcommand
 import com.accucodeai.kash.tools.git.porcelain.gitTagSubcommand
+import com.accucodeai.kash.tools.git.porcelain.gitUpdateIndexSubcommand
+import com.accucodeai.kash.tools.git.porcelain.gitUpdateRefSubcommand
+import com.accucodeai.kash.tools.git.porcelain.gitWhatchangedSubcommand
+import com.accucodeai.kash.tools.git.porcelain.gitWriteTreeSubcommand
 import com.accucodeai.kash.tools.git.seed.pushApplierFor
 import com.accucodeai.kash.tools.git.seed.refResolverFor
 import com.accucodeai.kash.tools.git.seed.resolverFor
@@ -106,6 +119,19 @@ public class GitCommand(
             gitPullSubcommand(),
             gitReflogSubcommand(),
             gitDescribeSubcommand(),
+            gitShortlogSubcommand(),
+            gitCherrySubcommand(),
+            gitWhatchangedSubcommand(),
+            gitGrepSubcommand(),
+            gitForEachRefSubcommand(),
+            gitShowRefSubcommand(),
+            gitSymbolicRefSubcommand(),
+            gitUpdateRefSubcommand(),
+            gitWriteTreeSubcommand(),
+            gitCommitTreeSubcommand(),
+            gitDiffTreeSubcommand(),
+            gitUpdateIndexSubcommand(),
+            gitMktreeSubcommand(),
         ).associateBy { it.name }
 
     override suspend fun run(
@@ -115,6 +141,9 @@ public class GitCommand(
         // Strip leading `-C <dir>` / `--git-dir=<...>` / `-c key=val` etc.
         var i = 0
         var chdir: String? = null
+        // `-c <key>=<val>` one-shot config overrides, keyed lowercase (git
+        // treats section/key names case-insensitively).
+        val configOverrides = mutableMapOf<String, String>()
         while (i < args.size) {
             val a = args[i]
             when {
@@ -137,25 +166,21 @@ public class GitCommand(
                     return CommandResult(exitCode = 0)
                 }
 
-                // `git -c key=val <cmd>` / `git -ckey=val <cmd>` —
-                // real git's one-shot config override. We consume the
-                // flag + its value so the next argv element is the
-                // subcommand, not a stray "user.email=foo" that would
-                // bubble up as "not a git command". Honoring the
-                // override against `.git/config` is a follow-up; for
-                // now we warn-and-ignore so scripts that do
-                // `git -c user.email=x commit` stop hard-failing.
+                // `git -c key=val <cmd>` / `git -ckey=val <cmd>` — git's
+                // one-shot config override. Captured into [configOverrides]
+                // and surfaced to subcommands via [GitEnv]. A bare `key`
+                // (no `=`) means the boolean `true`, as in git.
                 a == "-c" -> {
                     if (i + 1 >= args.size) {
                         ctx.stderr.writeUtf8("error: option \"-c\" requires a value\n")
                         return CommandResult(exitCode = 129)
                     }
-                    ctx.stderr.writeUtf8("git: ignoring unsupported global override '-c ${args[i + 1]}'\n")
+                    recordConfigOverride(configOverrides, args[i + 1])
                     i += 2
                 }
 
-                a.startsWith("-c") && a.length > 2 && a.contains('=') -> {
-                    ctx.stderr.writeUtf8("git: ignoring unsupported global override '$a'\n")
+                a.startsWith("-c") && a.length > 2 -> {
+                    recordConfigOverride(configOverrides, a.substring(2))
                     i++
                 }
 
@@ -202,7 +227,11 @@ public class GitCommand(
         // `git <sub> --help` / `git <sub> -h` — intercept BEFORE the sub
         // runs so a subcommand that doesn't understand `--help` itself
         // (which is all of them currently) still gives useful output.
-        if (subArgs.firstOrNull() == "--help" || subArgs.firstOrNull() == "-h") {
+        // `grep -h` is a real flag (suppress filename), so don't hijack it;
+        // `git grep --help` still routes here.
+        if (subArgs.firstOrNull() == "--help" ||
+            (subArgs.firstOrNull() == "-h" && subName != "grep")
+        ) {
             return emitHelp(ctx, subName)
         }
 
@@ -235,6 +264,7 @@ public class GitCommand(
                 resolver = resolverFor(adapter),
                 pushApplier = pushApplierFor(adapter),
                 refResolver = refResolverFor(adapter),
+                configOverrides = configOverrides,
             )
         return handler.run(subArgs, ctx, env)
     }
@@ -598,6 +628,120 @@ public class GitCommand(
                             "Walks back from <rev> (default HEAD) for the closest tag. Emits the " +
                                 "tag name on a direct hit, or <tag>-<N>-g<short-sha> otherwise.",
                     ),
+                "shortlog" to
+                    SubHelp(
+                        summary = "Summarize commit history grouped by author",
+                        usage = "git shortlog [-n] [-s] [-e] [-c] [<revision-range>] [-- <path>...]",
+                        details =
+                            "Groups commits by author (committer with -c) under an `Author (N):` " +
+                                "header. -s prints just the count; -n sorts by descending count; " +
+                                "-e shows the email.",
+                    ),
+                "cherry" to
+                    SubHelp(
+                        summary = "Find commits not yet applied upstream",
+                        usage = "git cherry [-v] <upstream> [<head> [<limit>]]",
+                        details =
+                            "Lists commits in <head> (default HEAD) not in <upstream>, prefixed " +
+                                "`+` (no equivalent upstream) or `-` (an equivalent patch exists), " +
+                                "matched by patch-id. -v appends the subject.",
+                    ),
+                "whatchanged" to
+                    SubHelp(
+                        summary = "Show logs with the changes each commit introduces",
+                        usage = "git whatchanged [-p] [--pretty=<fmt>] [-n <N>] [<rev>] [-- <path>...]",
+                        details =
+                            "Like `git log` but defaults to a raw per-commit change list " +
+                                "(`:<srcmode> <dstmode> <srcsha> <dstsha> <status>\\t<path>`); " +
+                                "-p shows the unified patch instead.",
+                    ),
+                "grep" to
+                    SubHelp(
+                        summary = "Print lines matching a pattern in tracked content",
+                        usage =
+                            "git grep [-n] [-i] [-l|-L] [-c] [-w] [-v] [-h] [-E|-F|-G] " +
+                                "[-e <pat>] [--cached] [<tree-ish>] [--] [<pathspec>...]",
+                        details =
+                            "Searches the working tree (tracked files), the index (--cached), or " +
+                                "a <tree-ish>. Patterns are BRE by default (-E extended, -F fixed). " +
+                                "Output mirrors git: `[<rev>:]<path>[:<lineno>]:<line>`.",
+                    ),
+                "for-each-ref" to
+                    SubHelp(
+                        summary = "Iterate over refs and emit a formatted line each",
+                        usage =
+                            "git for-each-ref [--count=<n>] [--sort=<key>] [--format=<fmt>] " +
+                                "[--points-at=<obj>] [<pattern>...]",
+                        details =
+                            "Default format `%(objectname) %(objecttype)\\t%(refname)`. Placeholders: " +
+                                "refname[:short], objectname[:short], objecttype, HEAD. --sort accepts a " +
+                                "leading `-` for descending.",
+                    ),
+                "show-ref" to
+                    SubHelp(
+                        summary = "List references in the local repository",
+                        usage = "git show-ref [--head] [--heads] [--tags] [-d] [-s] [--verify] [<pattern>...]",
+                        details =
+                            "Prints `<sha> <refname>` lines. -d adds a `<sha> <ref>^{}` deref line " +
+                                "for annotated tags. --verify requires exact full refnames.",
+                    ),
+                "symbolic-ref" to
+                    SubHelp(
+                        summary = "Read, write, or delete a symbolic ref",
+                        usage = "git symbolic-ref [-q] [--short] <name> [<ref>] | git symbolic-ref -d <name>",
+                        details =
+                            "With one arg, prints the ref <name> points at; with two, repoints it; " +
+                                "-d deletes it. --short strips the `refs/heads/` prefix.",
+                    ),
+                "update-ref" to
+                    SubHelp(
+                        summary = "Create, update, or delete a ref safely",
+                        usage = "git update-ref [-d] [-m <msg>] <ref> [<newvalue> [<oldvalue>]]",
+                        details =
+                            "Sets <ref> to <newvalue>, optionally requiring it currently equals " +
+                                "<oldvalue> (all-zero asserts it does not yet exist). -d deletes. " +
+                                "Writes a reflog entry.",
+                    ),
+                "write-tree" to
+                    SubHelp(
+                        summary = "Write the current index out as a tree object",
+                        usage = "git write-tree",
+                        details = "Builds (sub)tree objects from the index and prints the root tree sha.",
+                    ),
+                "commit-tree" to
+                    SubHelp(
+                        summary = "Create a commit object from a tree",
+                        usage = "git commit-tree <tree> [-p <parent>]... [-m <msg>] [-F <file>]",
+                        details =
+                            "Writes a commit pointing at <tree> with the given parents and message " +
+                                "(read from stdin if neither -m nor -F is given) and prints its sha.",
+                    ),
+                "diff-tree" to
+                    SubHelp(
+                        summary = "Compare the content and mode of two tree objects",
+                        usage =
+                            "git diff-tree [-r] [--root] [-p] [--name-only] [--name-status] " +
+                                "[--no-commit-id] <tree-ish> [<tree-ish>]",
+                        details =
+                            "With one commit, diffs it against its first parent; with two tree-ish, " +
+                                "diffs them. -r recurses into subtrees; -p emits the unified patch.",
+                    ),
+                "update-index" to
+                    SubHelp(
+                        summary = "Register file contents in the index",
+                        usage =
+                            "git update-index [--add] [--remove] [--cacheinfo <mode> <sha> <path>] " +
+                                "[--refresh] [--] [<file>...]",
+                        details =
+                            "Stages tracked file changes; --add registers new paths, --remove drops " +
+                                "entries, --cacheinfo inserts an entry by explicit mode/sha/path.",
+                    ),
+                "mktree" to
+                    SubHelp(
+                        summary = "Build a tree object from ls-tree formatted text",
+                        usage = "git mktree [-z]",
+                        details = "Reads `<mode> <type> <sha>\\t<path>` lines from stdin and prints the tree sha.",
+                    ),
             )
 
         private val HELP_GROUPS: List<HelpGroup> =
@@ -612,7 +756,7 @@ public class GitCommand(
                 ),
                 HelpGroup(
                     "examine the history and state",
-                    listOf("blame", "diff", "log", "ls-files", "show", "status"),
+                    listOf("blame", "diff", "grep", "log", "ls-files", "shortlog", "show", "status", "whatchanged"),
                 ),
                 HelpGroup(
                     "grow, mark and tweak your common history",
@@ -624,11 +768,25 @@ public class GitCommand(
                 ),
                 HelpGroup(
                     "low-level plumbing",
-                    listOf("cat-file", "hash-object", "ls-tree"),
+                    listOf(
+                        "cat-file",
+                        "commit-tree",
+                        "diff-tree",
+                        "hash-object",
+                        "ls-tree",
+                        "mktree",
+                        "update-index",
+                        "write-tree",
+                    ),
+                ),
+                HelpGroup(
+                    "low-level ref manipulation",
+                    listOf("for-each-ref", "show-ref", "symbolic-ref", "update-ref"),
                 ),
                 HelpGroup(
                     "other",
                     listOf(
+                        "cherry",
                         "cherry-pick",
                         "clean",
                         "config",
@@ -641,6 +799,23 @@ public class GitCommand(
                     ),
                 ),
             )
+    }
+}
+
+/**
+ * Record a `git -c <spec>` override into [into]. `<spec>` is `key=value`, or a
+ * bare `key` (meaning the boolean `true`, as in git). Keys are lowercased
+ * since git treats config section/variable names case-insensitively.
+ */
+private fun recordConfigOverride(
+    into: MutableMap<String, String>,
+    spec: String,
+) {
+    val eq = spec.indexOf('=')
+    if (eq < 0) {
+        into[spec.lowercase()] = "true"
+    } else {
+        into[spec.substring(0, eq).lowercase()] = spec.substring(eq + 1)
     }
 }
 
@@ -674,4 +849,10 @@ public class GitEnv(
      * the local tracking ref in line. Null for non-OnDemand seeds.
      */
     public val refResolver: com.accucodeai.kash.api.git.GitRefResolver? = null,
+    /**
+     * One-shot `git -c <key>=<val>` config overrides for this invocation,
+     * keyed lowercase (e.g. `color.ui` -> `auto`). Consulted ahead of
+     * `.git/config`; empty when none were passed.
+     */
+    public val configOverrides: Map<String, String> = emptyMap(),
 )

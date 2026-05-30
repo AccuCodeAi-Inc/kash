@@ -145,8 +145,8 @@ class CherryPickRmStashTest {
             run(fs, "/r", "commit", "-m", "init")
             fs.writeBytes("/r/untracked", "U\n".encodeToByteArray())
             fs.writeBytes("/r/also", "A\n".encodeToByteArray())
-            // refuses without -f
-            assertEquals(1, run(fs, "/r", "clean").rc)
+            // refuses without -f (real git exits 128 here)
+            assertEquals(128, run(fs, "/r", "clean").rc)
             // dry-run lists
             val dr = run(fs, "/r", "clean", "-n")
             assertTrue("Would remove also" in dr.stdout, dr.stdout)

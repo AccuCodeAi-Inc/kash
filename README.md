@@ -16,7 +16,13 @@
 Kash is POSIX userland environment with over 120 tools directly implemented in Kotlin. It runs
 on the JVM and WASM.
 
-Is it a VM? An emulator? Not exactly. All of Kash runs directly on the machine with 0(ish) virtualization.
+Why? AI is trained on BASH. You can given any modern model a REPL tool and it will know what to do. No context needed.
+
+Why not a real VM? VMs take time to start, and it's hard to just reach in and mess with the internals. With Kash the
+entire Linux ecosystem is just kotlin code.
+
+Also it's just reallllly cool :P. For example it is trivial to have an AI exec a tool and immediately see the actual
+diff that causes.
 
 ## Play with the REPL
 

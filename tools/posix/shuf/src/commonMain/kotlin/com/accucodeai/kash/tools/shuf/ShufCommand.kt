@@ -6,6 +6,7 @@ import com.accucodeai.kash.api.CommandKind
 import com.accucodeai.kash.api.CommandResult
 import com.accucodeai.kash.api.CommandSpec
 import com.accucodeai.kash.api.CommandTag
+import com.accucodeai.kash.api.ansi.Ansi
 import com.accucodeai.kash.api.io.SuspendSink
 import com.accucodeai.kash.api.io.readAllBytes
 import com.accucodeai.kash.api.io.writeBytes
@@ -252,7 +253,7 @@ public class ShufCommand :
             }
 
         // Emit.
-        val term = if (opts.zero) " " else "\n"
+        val term = if (opts.zero) Ansi.NUL else "\n"
         val outBytes =
             buildString {
                 for (line in picked) {

@@ -1,6 +1,7 @@
 package com.accucodeai.kash.app
 
 import com.accucodeai.kash.snapshot.MachineSnapshot
+import com.accucodeai.kash.snapshot.SnapshotJson
 import kotlinx.serialization.json.Json
 import java.nio.file.Files
 import java.nio.file.Path
@@ -118,15 +119,9 @@ public class KashSnapshotStore(
     public companion object {
         public const val DEFAULT_WAIT_TIMEOUT_MS: Long = 60_000
 
-        private val json: Json =
-            Json {
-                ignoreUnknownKeys = true
-                encodeDefaults = true
-                // Pretty-printing makes the on-disk file vaguely readable
-                // when an agent or developer wants to spot-check what's
-                // persisted. Cost: slightly bigger file, slightly slower
-                // encode. Acceptable for a shell-tool workload.
-                prettyPrint = false
-            }
+        // The one canonical snapshot codec (see :corevm SnapshotJson),
+        // shared with the web store and the shell's slot read/write so the
+        // on-disk state file round-trips identically across layers.
+        private val json: Json = SnapshotJson
     }
 }

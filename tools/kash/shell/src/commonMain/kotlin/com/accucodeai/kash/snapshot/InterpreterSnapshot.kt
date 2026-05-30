@@ -3,7 +3,6 @@ package com.accucodeai.kash.snapshot
 import com.accucodeai.kash.ast.FunctionDef
 import com.accucodeai.kash.fs.FsSnapshot
 import kotlinx.serialization.Serializable
-import kotlinx.serialization.json.Json
 
 /**
  * Quiescent snapshot of a [com.accucodeai.kash.Kash.Session]'s mutable state.
@@ -17,7 +16,7 @@ import kotlinx.serialization.json.Json
  * flag) is intentionally NOT serialized — supply it again at restore time.
  *
  * Format is whatever the caller chooses via `kotlinx.serialization`; see
- * [SnapshotJson] for a default JSON instance.
+ * [SnapshotJson] (in `:corevm`) for the canonical JSON instance.
  */
 @Serializable
 public data class InterpreterSnapshot(
@@ -35,11 +34,3 @@ public data class InterpreterSnapshot(
     /** Runtime alias table (`alias name=value`). Insertion-ordered. */
     val aliases: Map<String, String> = emptyMap(),
 )
-
-/** Convenience JSON instance — format-neutral, just needs to round-trip. */
-public val SnapshotJson: Json =
-    Json {
-        encodeDefaults = true
-        ignoreUnknownKeys = true
-        allowStructuredMapKeys = true
-    }

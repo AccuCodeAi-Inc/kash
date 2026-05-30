@@ -5,9 +5,13 @@ import com.accucodeai.kash.api.git.GitIdentity
 import com.accucodeai.kash.api.git.GitObjectResolver
 import com.accucodeai.kash.api.git.GitRepoSeed
 import com.accucodeai.kash.fs.FileSystem
+import com.accucodeai.kash.tools.git.plumbing.FileMode
+import com.accucodeai.kash.tools.git.plumbing.FlatFile
 import com.accucodeai.kash.tools.git.plumbing.ObjectStore
 import com.accucodeai.kash.tools.git.plumbing.RefStore
 import com.accucodeai.kash.tools.git.plumbing.RepoLayout
+import com.accucodeai.kash.tools.git.plumbing.encodeIndex
+import com.accucodeai.kash.tools.git.plumbing.indexFromFlatTree
 import com.accucodeai.kash.tools.git.plumbing.zlibDeflate
 
 /**
@@ -170,6 +174,29 @@ private suspend fun writeRealGit(
     val headSha = refs.resolveHead() ?: return
     val commit = store.readCommit(headSha)
     materializeTree(store, fs, layout, commit.tree, "")
+
+    // Write the index to match HEAD so `git status`/`git diff` on the
+    // untouched work tree report clean (a real checkout leaves such an index).
+    val flat = mutableMapOf<String, FlatFile>()
+    collectFlatFromTree(store, commit.tree, "", flat)
+    fs.writeBytes(layout.indexFile, encodeIndex(indexFromFlatTree(flat)))
+}
+
+/** Walk a tree into a [FlatTree] (path -> bytes + exec bit) for index building. */
+private suspend fun collectFlatFromTree(
+    store: ObjectStore,
+    treeSha: String,
+    prefix: String,
+    out: MutableMap<String, FlatFile>,
+) {
+    for (entry in store.readTree(treeSha)) {
+        val path = if (prefix.isEmpty()) entry.name else "$prefix/${entry.name}"
+        when (entry.mode) {
+            FileMode.TREE -> collectFlatFromTree(store, entry.sha, path, out)
+            FileMode.EXECUTABLE -> out[path] = FlatFile(store.readBlob(entry.sha), executable = true)
+            else -> out[path] = FlatFile(store.readBlob(entry.sha), executable = false)
+        }
+    }
 }
 
 private suspend fun materializeTree(

@@ -2,6 +2,7 @@ package com.accucodeai.kash.tools.git.porcelain
 
 import com.accucodeai.kash.api.CommandContext
 import com.accucodeai.kash.api.CommandResult
+import com.accucodeai.kash.api.ansi.Ansi
 import com.accucodeai.kash.api.io.writeUtf8
 import com.accucodeai.kash.fs.FileSystem
 import com.accucodeai.kash.tools.git.GitEnv
@@ -9,6 +10,7 @@ import com.accucodeai.kash.tools.git.GitRepo
 import com.accucodeai.kash.tools.git.plumbing.FileMode
 import com.accucodeai.kash.tools.git.plumbing.RefStore
 import com.accucodeai.kash.tools.git.plumbing.blobSha
+import kotlin.coroutines.cancellation.CancellationException
 
 /**
  * `git status` — compare HEAD vs index vs work tree and report.
@@ -16,13 +18,19 @@ import com.accucodeai.kash.tools.git.plumbing.blobSha
  * Supported flags:
  *  - `--porcelain` (alias of `--porcelain=v1`): the stable
  *    machine-readable format with `XY path` per line.
- *  - `-s` / `--short`: same as porcelain but without `--porcelain`'s
- *    no-color guarantee. We emit the same bytes either way.
- *  - default: long-form output.
+ *  - `--porcelain=v2`: the harder-to-parse v2 layout (we fill XY + path;
+ *    the mode/hash columns are stubbed with zeros).
+ *  - `-s` / `--short`: same as porcelain v1 but without the no-color
+ *    guarantee. We emit the same bytes either way.
+ *  - `-b` / `--branch`: prepend the `## branch...upstream` header to the
+ *    short/porcelain output.
+ *  - `-z`: NUL-terminate (rather than newline-terminate) porcelain records.
+ *  - `--ignored[=traditional|matching]`: also list `.gitignore`d paths.
+ *  - `--no-renames`: accepted (we never detect renames, so it's a no-op).
+ *  - default: long-form output, matched byte-for-byte against real git.
  *
- * Not implemented: rename/copy detection, `--ignored`, submodule
- * status. The porcelain v2 layout is also deferred — v1 covers every
- * common script integration.
+ * Not implemented: rename/copy detection (long + porcelain both treat a
+ * rename as a delete + add), submodule status detail.
  */
 public fun gitStatusSubcommand(): GitSubcommand =
     object : GitSubcommand {
@@ -42,6 +50,13 @@ public fun gitStatusSubcommand(): GitSubcommand =
 
             var format = StatusFormat.LONG
             var showBranch = false
+            var nulTerminate = false
+            var showIgnored = false
+            // Untracked-files mode. kash always enumerates individual untracked
+            // files (no cheap "normal"/"all" distinction here), so the only
+            // mode that changes output is "no" (suppress untracked).
+            var showUntracked = true
+            var colorMode: com.accucodeai.kash.api.ansi.ColorMode? = null
             for (a in args) {
                 when {
                     a == "--porcelain" || a == "--porcelain=v1" || a == "-s" || a == "--short" -> {
@@ -52,9 +67,74 @@ public fun gitStatusSubcommand(): GitSubcommand =
                         format = StatusFormat.PORCELAIN_V2
                     }
 
+                    a == "--long" -> {
+                        format = StatusFormat.LONG
+                    }
+
                     a == "--branch" || a == "-b" -> {
                         showBranch = true
                     }
+
+                    a == "-z" -> {
+                        nulTerminate = true
+                    }
+
+                    a == "--ignored" || a == "--ignored=traditional" || a == "--ignored=matching" -> {
+                        showIgnored = true
+                    }
+
+                    a == "--ignored=no" -> {
+                        showIgnored = false
+                    }
+
+                    // `-u`/`--untracked-files[=<mode>]`: no|normal|all (default all).
+                    // Only "no" changes our output (suppress untracked).
+                    a == "-u" || a == "--untracked-files" -> {
+                        showUntracked = true
+                    }
+
+                    a.startsWith("-u") || a.startsWith("--untracked-files=") -> {
+                        val mode = if (a.startsWith("--")) a.substringAfter("=") else a.removePrefix("-u")
+                        when (mode) {
+                            "no" -> {
+                                showUntracked = false
+                            }
+
+                            "normal", "all" -> {
+                                showUntracked = true
+                            }
+
+                            else -> {
+                                ctx.stderr.writeUtf8("git status: invalid untracked-files mode '$mode'\n")
+                                return CommandResult(exitCode = 129)
+                            }
+                        }
+                    }
+
+                    a == "--no-color" -> {
+                        colorMode = com.accucodeai.kash.api.ansi.ColorMode.NEVER
+                    }
+
+                    a == "--color" -> {
+                        colorMode = com.accucodeai.kash.api.ansi.ColorMode.AUTO
+                    }
+
+                    a.startsWith("--color=") -> {
+                        val m =
+                            com.accucodeai.kash.api.ansi.ColorMode
+                                .parse(a.substringAfter("="))
+                        if (m == null) {
+                            ctx.stderr.writeUtf8("git status: invalid color mode '${a.substringAfter("=")}'\n")
+                            return CommandResult(exitCode = 129)
+                        }
+                        colorMode = m
+                    }
+
+                    // Rename detection is never on for us; accept the flags
+                    // so scripts that pass them don't get an error.
+                    a == "--no-renames" || a == "--renames" || a == "--find-renames" ||
+                        a.startsWith("--find-renames=") || a == "--no-ahead-behind" ||
+                        a == "--ahead-behind" -> {}
 
                     a == "--" -> {}
 
@@ -67,26 +147,39 @@ public fun gitStatusSubcommand(): GitSubcommand =
                 }
             }
 
-            val (entries, branch, noCommits) = computeStatus(repo, ctx.fs)
+            val computed = computeStatus(repo, ctx.fs)
+            val status =
+                if (showUntracked) {
+                    computed
+                } else {
+                    StatusResult(
+                        entries = computed.entries.filter { it.indexCode != '?' },
+                        branch = computed.branch,
+                        detachedShort = computed.detachedShort,
+                        noCommits = computed.noCommits,
+                        ignored = computed.ignored,
+                    )
+                }
             val branchInfo =
-                if (showBranch || format == StatusFormat.PORCELAIN_V2) {
-                    computeBranchInfo(repo, branch)
+                if (showBranch || format == StatusFormat.PORCELAIN_V2 || format == StatusFormat.LONG) {
+                    computeBranchInfo(repo, status.branch)
                 } else {
                     null
                 }
             when (format) {
                 StatusFormat.PORCELAIN -> {
-                    if (showBranch && branchInfo != null) renderBranchHeader(branchInfo, ctx)
-                    renderPorcelain(entries, ctx)
+                    if (showBranch && branchInfo != null) renderBranchHeader(branchInfo, nulTerminate, ctx)
+                    renderPorcelain(status.entries, showIgnored, status.ignored, nulTerminate, ctx)
                 }
 
                 StatusFormat.PORCELAIN_V2 -> {
                     if (branchInfo != null) renderBranchHeaderV2(branchInfo, ctx)
-                    renderPorcelainV2(entries, ctx)
+                    renderPorcelainV2(status.entries, ctx)
                 }
 
                 StatusFormat.LONG -> {
-                    renderLong(entries, branch, noCommits, ctx)
+                    val styler = gitColorStyler(ctx, repo, "status", colorMode, env.configOverrides)
+                    renderLong(status, branchInfo, showIgnored, styler, ctx)
                 }
             }
             return CommandResult(exitCode = 0)
@@ -131,7 +224,10 @@ private suspend fun computeBranchInfo(
         } else {
             0 to 0
         }
-    return BranchInfo(oid, headLabel, upstreamShort, ahead, behind)
+    // Only report an upstream when it actually resolves to an object —
+    // a config entry pointing at a missing remote-tracking ref shouldn't
+    // produce a phantom "up to date" line.
+    return BranchInfo(oid, headLabel, if (upstreamOid != null) upstreamShort else null, ahead, behind)
 }
 
 /** Count `ahead` (in HEAD not upstream) and `behind` (upstream not HEAD). */
@@ -162,6 +258,8 @@ private suspend fun bfsAncestors(
         val c =
             try {
                 repo.objects.readCommit(cur)
+            } catch (ce: CancellationException) {
+                throw ce
             } catch (_: Throwable) {
                 continue
             }
@@ -171,8 +269,15 @@ private suspend fun bfsAncestors(
 
 private suspend fun renderBranchHeader(
     info: BranchInfo,
+    nulTerminate: Boolean,
     ctx: CommandContext,
 ) {
+    val headLabel =
+        if (info.oid == null) {
+            "No commits yet on ${info.head}"
+        } else {
+            info.head
+        }
     val tail =
         when {
             info.upstream == null -> {
@@ -191,7 +296,7 @@ private suspend fun renderBranchHeader(
                     ).joinToString(", ") + "]"
             }
         }
-    ctx.stdout.writeUtf8("## ${info.head}$tail\n")
+    ctx.stdout.writeUtf8("## $headLabel$tail" + if (nulTerminate) Ansi.NUL else "\n")
 }
 
 private suspend fun renderBranchHeaderV2(
@@ -234,10 +339,18 @@ private class StatusEntry(
     val workCode: Char, // 'M','D',' ','?'
 )
 
+private class StatusResult(
+    val entries: List<StatusEntry>,
+    val branch: String?, // branch name, or null when detached / no head
+    val detachedShort: String?, // short HEAD sha when detached
+    val noCommits: Boolean,
+    val ignored: List<String>,
+)
+
 private suspend fun computeStatus(
     repo: GitRepo,
     fs: FileSystem,
-): Triple<List<StatusEntry>, String?, Boolean> {
+): StatusResult {
     val head = repo.refs.readHead()
     val headSha = repo.refs.resolveHead()
     val branch =
@@ -245,6 +358,12 @@ private suspend fun computeStatus(
             null -> null
             is RefStore.Head.Detached -> null
             is RefStore.Head.Symbolic -> head.target.removePrefix("refs/heads/")
+        }
+    val detachedShort =
+        if (head is RefStore.Head.Detached || (branch == null && headSha != null)) {
+            headSha?.substring(0, 7)
+        } else {
+            null
         }
     val noCommits = headSha == null
 
@@ -254,7 +373,7 @@ private suspend fun computeStatus(
             emptyMap()
         } else {
             val commit = repo.objects.readCommit(headSha)
-            flattenTree(repo, commit.tree, "")
+            flattenTreeShas(repo, commit.tree, "")
         }
 
     val index = repo.readIndex()
@@ -301,10 +420,16 @@ private suspend fun computeStatus(
         entries += StatusEntry(p, '?', '?')
     }
 
-    return Triple(entries.sortedBy { it.path }, branch, noCommits)
+    return StatusResult(
+        entries = entries.sortedBy { it.path },
+        branch = branch,
+        detachedShort = detachedShort,
+        noCommits = noCommits,
+        ignored = scan.ignoredFiles.sorted(),
+    )
 }
 
-private suspend fun flattenTree(
+private suspend fun flattenTreeShas(
     repo: GitRepo,
     treeSha: String,
     prefix: String,
@@ -318,7 +443,7 @@ private suspend fun flattenTree(
             }
 
             FileMode.TREE -> {
-                out.putAll(flattenTree(repo, entry.sha, p))
+                out.putAll(flattenTreeShas(repo, entry.sha, p))
             }
         }
     }
@@ -330,67 +455,64 @@ private fun absOf(
     rel: String,
 ): String = if (workTree == "/") "/$rel" else "$workTree/$rel"
 
-private fun collectWorktree(
-    fs: FileSystem,
-    workTree: String,
-): Set<String> {
-    val out = mutableSetOf<String>()
-    walk(fs, workTree, "", out)
-    return out
-}
-
-private fun walk(
-    fs: FileSystem,
-    abs: String,
-    rel: String,
-    out: MutableSet<String>,
-) {
-    for (name in fs.list(abs)) {
-        if (name == ".git") continue
-        val sub = if (abs.endsWith("/")) "$abs$name" else "$abs/$name"
-        val subRel = if (rel.isEmpty()) name else "$rel/$name"
-        if (fs.isDirectory(sub)) {
-            // A subdirectory containing its own `.git/` is a nested repo
-            // boundary. Real git lists the nested repo as a single
-            // untracked path (with trailing `/`) and refuses to recurse,
-            // so the outer repo never reports the inner's working files.
-            if (fs.exists("$sub/.git")) {
-                out += "$subRel/"
-            } else {
-                walk(fs, sub, subRel, out)
-            }
-        } else {
-            out += subRel
-        }
-    }
-}
-
 private suspend fun renderPorcelain(
     entries: List<StatusEntry>,
+    showIgnored: Boolean,
+    ignored: List<String>,
+    nulTerminate: Boolean,
     ctx: CommandContext,
 ) {
     // Real git emits tracked entries first (alphabetical) and untracked
     // entries last (also alphabetical). We sort here instead of relying
     // on the global path-sort because untracked-vs-tracked order has to
     // be a hard split, not interleaved.
+    val term = if (nulTerminate) Ansi.NUL else "\n"
     val tracked = entries.filter { it.indexCode != '?' }.sortedBy { it.path }
     val untracked = entries.filter { it.indexCode == '?' }.sortedBy { it.path }
     for (e in tracked) {
-        ctx.stdout.writeUtf8("${e.indexCode}${e.workCode} ${e.path}\n")
+        ctx.stdout.writeUtf8("${e.indexCode}${e.workCode} ${e.path}$term")
     }
     for (e in untracked) {
-        ctx.stdout.writeUtf8("?? ${e.path}\n")
+        ctx.stdout.writeUtf8("?? ${e.path}$term")
+    }
+    if (showIgnored) {
+        for (p in ignored) ctx.stdout.writeUtf8("!! $p$term")
     }
 }
 
 private suspend fun renderLong(
-    entries: List<StatusEntry>,
-    branch: String?,
-    noCommits: Boolean,
+    status: StatusResult,
+    branchInfo: BranchInfo?,
+    showIgnored: Boolean,
+    styler: com.accucodeai.kash.api.ansi.AnsiStyler,
     ctx: CommandContext,
 ) {
-    ctx.stdout.writeUtf8("On branch ${branch ?: "HEAD detached"}\n")
-    if (noCommits) ctx.stdout.writeUtf8("\nNo commits yet\n")
+    val entries = status.entries
+    if (status.branch != null) {
+        ctx.stdout.writeUtf8("On branch ${status.branch}\n")
+    } else if (status.detachedShort != null) {
+        ctx.stdout.writeUtf8("HEAD detached at ${status.detachedShort}\n")
+    } else {
+        ctx.stdout.writeUtf8("On branch ${status.branch ?: "HEAD detached"}\n")
+    }
+
+    // `headerPrinted` tracks whether anything has been emitted after the
+    // `On branch <x>` line. Real git separates each subsequent block with
+    // a leading blank line *only* once something precedes it; the very
+    // first block after a bare `On branch <x>` gets no blank line.
+    var headerPrinted = false
+    if (status.noCommits) {
+        ctx.stdout.writeUtf8("\nNo commits yet\n")
+        headerPrinted = true
+    } else if (branchInfo != null && branchInfo.upstream != null) {
+        ctx.stdout.writeUtf8(upstreamLine(branchInfo))
+        headerPrinted = true
+    }
+
+    suspend fun blockGap() {
+        if (headerPrinted) ctx.stdout.writeUtf8("\n")
+        headerPrinted = true
+    }
 
     val staged =
         entries.filter { it.indexCode != ' ' && it.indexCode != '?' }
@@ -398,45 +520,122 @@ private suspend fun renderLong(
     val untracked = entries.filter { it.indexCode == '?' }
 
     if (staged.isNotEmpty()) {
-        ctx.stdout.writeUtf8("\nChanges to be committed:\n")
-        ctx.stdout.writeUtf8("  (use \"git restore --staged <file>...\" to unstage)\n")
+        blockGap()
+        ctx.stdout.writeUtf8("Changes to be committed:\n")
+        if (status.noCommits) {
+            ctx.stdout.writeUtf8("  (use \"git rm --cached <file>...\" to unstage)\n")
+        } else {
+            ctx.stdout.writeUtf8("  (use \"git restore --staged <file>...\" to unstage)\n")
+        }
         for (e in staged) {
-            val label =
-                when (e.indexCode) {
-                    'A' -> "new file:   "
-                    'M' -> "modified:   "
-                    'D' -> "deleted:    "
-                    else -> "${e.indexCode}:    "
-                }
-            ctx.stdout.writeUtf8("\t$label${e.path}\n")
+            val entry = styler.style("${longLabel(e.indexCode)}${e.path}", com.accucodeai.kash.api.ansi.Sgr.FG_GREEN)
+            ctx.stdout.writeUtf8("\t$entry\n")
         }
     }
 
     if (unstaged.isNotEmpty()) {
-        ctx.stdout.writeUtf8("\nChanges not staged for commit:\n")
-        ctx.stdout.writeUtf8("  (use \"git add <file>...\" to update what will be committed)\n")
+        blockGap()
+        ctx.stdout.writeUtf8("Changes not staged for commit:\n")
+        val hasDelete = unstaged.any { it.workCode == 'D' }
+        if (hasDelete) {
+            ctx.stdout.writeUtf8("  (use \"git add/rm <file>...\" to update what will be committed)\n")
+        } else {
+            ctx.stdout.writeUtf8("  (use \"git add <file>...\" to update what will be committed)\n")
+        }
+        ctx.stdout.writeUtf8("  (use \"git restore <file>...\" to discard changes in working directory)\n")
         for (e in unstaged) {
-            val label =
-                when (e.workCode) {
-                    'M' -> "modified:   "
-                    'D' -> "deleted:    "
-                    else -> "${e.workCode}:    "
-                }
-            ctx.stdout.writeUtf8("\t$label${e.path}\n")
+            val entry = styler.style("${longLabel(e.workCode)}${e.path}", com.accucodeai.kash.api.ansi.Sgr.FG_RED)
+            ctx.stdout.writeUtf8("\t$entry\n")
         }
     }
 
     if (untracked.isNotEmpty()) {
-        ctx.stdout.writeUtf8("\nUntracked files:\n")
+        blockGap()
+        ctx.stdout.writeUtf8("Untracked files:\n")
         ctx.stdout.writeUtf8("  (use \"git add <file>...\" to include in what will be committed)\n")
-        for (e in untracked) ctx.stdout.writeUtf8("\t${e.path}\n")
+        for (e in untracked) {
+            ctx.stdout.writeUtf8("\t${styler.style(e.path, com.accucodeai.kash.api.ansi.Sgr.FG_RED)}\n")
+        }
     }
 
-    if (staged.isEmpty() && unstaged.isEmpty() && untracked.isEmpty()) {
-        if (noCommits) {
-            ctx.stdout.writeUtf8("\nnothing to commit (create/copy files and use \"git add\" to track)\n")
-        } else {
-            ctx.stdout.writeUtf8("\nnothing to commit, working tree clean\n")
+    if (showIgnored && status.ignored.isNotEmpty()) {
+        blockGap()
+        ctx.stdout.writeUtf8("Ignored files:\n")
+        ctx.stdout.writeUtf8("  (use \"git add -f <file>...\" to include in what will be committed)\n")
+        for (p in status.ignored) ctx.stdout.writeUtf8("\t$p\n")
+    }
+
+    // Trailing summary. Real git only prints summary text when nothing is
+    // staged — staged changes mean there IS something ready to commit, so
+    // git stays quiet (but still emits the trailing blank line that would
+    // have preceded a summary). When nothing is staged: clean → "nothing
+    // to commit"; unstaged changes → "no changes added to commit";
+    // untracked only → "nothing added to commit but untracked …".
+    val anyStaged = staged.isNotEmpty()
+    val anyUnstaged = unstaged.isNotEmpty()
+    val anyUntracked = untracked.isNotEmpty()
+    when {
+        anyStaged -> {
+            // No summary text; just the trailing gap.
+            ctx.stdout.writeUtf8("\n")
+        }
+
+        !anyUnstaged && !anyUntracked -> {
+            blockGap()
+            if (status.noCommits) {
+                ctx.stdout.writeUtf8("nothing to commit (create/copy files and use \"git add\" to track)\n")
+            } else {
+                ctx.stdout.writeUtf8("nothing to commit, working tree clean\n")
+            }
+        }
+
+        anyUnstaged -> {
+            blockGap()
+            ctx.stdout.writeUtf8("no changes added to commit (use \"git add\" and/or \"git commit -a\")\n")
+        }
+
+        else -> {
+            // untracked only
+            blockGap()
+            ctx.stdout.writeUtf8("nothing added to commit but untracked files present (use \"git add\" to track)\n")
         }
     }
 }
+
+private fun longLabel(code: Char): String =
+    when (code) {
+        'A' -> "new file:   "
+        'M' -> "modified:   "
+        'D' -> "deleted:    "
+        'R' -> "renamed:    "
+        'C' -> "copied:     "
+        'T' -> "typechange: "
+        else -> "$code:    "
+    }
+
+private fun upstreamLine(info: BranchInfo): String {
+    val up = info.upstream
+    return when {
+        info.ahead > 0 && info.behind > 0 -> {
+            "Your branch and '$up' have diverged,\n" +
+                "and have ${info.ahead} and ${info.behind} different commits each, respectively.\n" +
+                "  (use \"git pull\" if you want to integrate the remote branch with yours)\n"
+        }
+
+        info.ahead > 0 -> {
+            "Your branch is ahead of '$up' by ${info.ahead} ${commitWord(info.ahead)}.\n" +
+                "  (use \"git push\" to publish your local commits)\n"
+        }
+
+        info.behind > 0 -> {
+            "Your branch is behind '$up' by ${info.behind} ${commitWord(info.behind)}, and can be fast-forwarded.\n" +
+                "  (use \"git pull\" to update your local branch)\n"
+        }
+
+        else -> {
+            "Your branch is up to date with '$up'.\n"
+        }
+    }
+}
+
+private fun commitWord(n: Int): String = if (n == 1) "commit" else "commits"
