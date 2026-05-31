@@ -44,10 +44,16 @@ internal class Expander(
      * per bash semantics). 0 when the shell has no recorded parent.
      */
     internal val shellPpid: Int = 0,
-    /** Indexed-array storage (read-only view from interpreter). */
-    internal val indexedArrays: Map<String, Map<Int, String>> = emptyMap(),
-    /** Associative-array storage (read-only view from interpreter). */
-    internal val assocArrays: Map<String, Map<String, String>> = emptyMap(),
+    /**
+     * Indexed-array storage (read-only view from interpreter). Supplied as a
+     * thunk and materialized lazily (see [indexedArrays]): the interpreter's
+     * snapshot walks every visible variable, but the overwhelming majority of
+     * expansions (`s=$((s+i))`, `n=${#x}`, plain `$var`) never reference an
+     * array, so that walk is skipped entirely for them.
+     */
+    indexedArraysProvider: () -> Map<String, Map<Int, String>> = { emptyMap() },
+    /** Associative-array storage (read-only view). Lazy — see [assocArrays]. */
+    assocArraysProvider: () -> Map<String, Map<String, String>> = { emptyMap() },
     /** Source line of the command currently in flight; backs `$LINENO`. */
     internal val currentLine: Int = 0,
     /** Drives `~user` tilde-prefix lookups. */
@@ -170,7 +176,27 @@ internal class Expander(
      * with `unbound variable`. See [appendParameterExpansion].
      */
     internal val nounset: Boolean = false,
+    /**
+     * Machine-scoped cache of compiled glob/pattern matchers, shared across
+     * every expansion on the same shell (the [Interpreter] owns it and passes
+     * the same instance to each [Expander] it builds). Default is a private
+     * cache so direct Expander instantiations in tests still work (they just
+     * don't share compiled state across calls).
+     */
+    internal val globCache: GlobCache = GlobCache(),
 ) {
+    /**
+     * Indexed/associative array snapshots, materialized on first access from
+     * the provider thunks. `lazy(NONE)` because an Expander is used by a
+     * single thread for one expansion — no synchronization needed. Most
+     * expansions never touch an array, so the interpreter's per-call
+     * whole-variable-table walk is never paid for them.
+     */
+    internal val indexedArrays: Map<String, Map<Int, String>> by
+        lazy(LazyThreadSafetyMode.NONE, indexedArraysProvider)
+    internal val assocArrays: Map<String, Map<String, String>> by
+        lazy(LazyThreadSafetyMode.NONE, assocArraysProvider)
+
     /**
      * Set to true while expanding the operand of `${var-WORD}` /
      * `${var=WORD}` / `${var:-WORD}` / `${var:=WORD}` / `${var:+WORD}` /

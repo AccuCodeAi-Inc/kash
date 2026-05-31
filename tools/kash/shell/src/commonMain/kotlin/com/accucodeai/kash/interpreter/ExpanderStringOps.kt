@@ -43,7 +43,7 @@ internal fun Expander.stripPrefix(
     longest: Boolean,
 ): String {
     if (pattern.isEmpty()) return value
-    val n = CompiledGlob.compile(pattern).matchAtStart(value, longest = longest) ?: return value
+    val n = globCache.compile(pattern).matchAtStart(value, longest = longest) ?: return value
     return value.substring(n)
 }
 
@@ -53,7 +53,7 @@ internal fun Expander.stripSuffix(
     longest: Boolean,
 ): String {
     if (pattern.isEmpty()) return value
-    val n = CompiledGlob.compile(pattern).matchAtEnd(value, longest = longest) ?: return value
+    val n = globCache.compile(pattern).matchAtEnd(value, longest = longest) ?: return value
     return value.substring(0, value.length - n)
 }
 
@@ -177,7 +177,7 @@ internal fun Expander.patternSubst(
         }
     }
     val nocase = shoptOptions["nocasematch"] == true
-    val g = CompiledGlob.compile(pattern, caseInsensitive = nocase)
+    val g = globCache.compile(pattern, caseInsensitive = nocase)
     return when (anchor) {
         '#' -> {
             val n = g.matchAtStart(value, longest = true) ?: return value
@@ -205,26 +205,34 @@ internal fun Expander.caseMod(
     upper: Boolean,
     all: Boolean,
 ): String {
-    val effective = pattern.ifEmpty { "?" }
-    val g = CompiledGlob.compile(effective)
+    if (value.isEmpty()) return value
+
+    fun mod(ch: Char): Char = if (upper) ch.uppercaseChar() else ch.lowercaseChar()
+    // Fast path: `${var^^}` / `${var,,}` / `${var^}` / `${var,}` (no explicit
+    // pattern) apply to every character, so skip compiling the implicit `?`
+    // glob and the per-char regex match + 1-char String allocation.
+    if (pattern.isEmpty()) {
+        val chars = value.toCharArray()
+        if (all) {
+            for (i in chars.indices) chars[i] = mod(chars[i])
+        } else {
+            chars[0] = mod(chars[0])
+        }
+        return chars.concatToString()
+    }
+    // Explicit pattern (e.g. `${var^^[aeiou]}`): bash applies it to each
+    // character independently, so match per-char.
+    val g = globCache.compile(pattern)
     val chars = value.toCharArray()
     if (all) {
-        // Bash applies the pattern to each character independently. The
-        // hot path is `?` (any char) → match every char. Test per-char
-        // against [g.matchesFull] — one regex apply, no allocation beyond
-        // a 1-char substring.
         for (i in chars.indices) {
-            if (g.matchesFull(chars[i].toString())) {
-                chars[i] = if (upper) chars[i].uppercaseChar() else chars[i].lowercaseChar()
-            }
+            if (g.matchesFull(chars[i].toString())) chars[i] = mod(chars[i])
         }
     } else {
         // `${var^pat}` / `${var,pat}` — only the first char, and only if
         // the pattern matches it. (Bash quirk: when pattern doesn't match
         // the first char, the operation is a no-op, not a continued search.)
-        if (chars.isNotEmpty() && g.matchesFull(chars[0].toString())) {
-            chars[0] = if (upper) chars[0].uppercaseChar() else chars[0].lowercaseChar()
-        }
+        if (g.matchesFull(chars[0].toString())) chars[0] = mod(chars[0])
     }
     return chars.concatToString()
 }
@@ -234,9 +242,7 @@ internal fun Expander.caseToggle(
     pattern: String,
     all: Boolean,
 ): String {
-    val effective = pattern.ifEmpty { "?" }
-    val g = CompiledGlob.compile(effective)
-    val chars = value.toCharArray()
+    if (value.isEmpty()) return value
 
     fun flip(ch: Char): Char =
         when {
@@ -244,6 +250,19 @@ internal fun Expander.caseToggle(
             ch.isLowerCase() -> ch.uppercaseChar()
             else -> ch
         }
+    // Fast path: `${var~~}` / `${var~}` (no explicit pattern) toggle every (or
+    // the first) character — skip compiling `?` and the per-char regex match.
+    if (pattern.isEmpty()) {
+        val chars = value.toCharArray()
+        if (all) {
+            for (i in chars.indices) chars[i] = flip(chars[i])
+        } else {
+            chars[0] = flip(chars[0])
+        }
+        return chars.concatToString()
+    }
+    val g = globCache.compile(pattern)
+    val chars = value.toCharArray()
     if (all) {
         for (i in chars.indices) {
             if (g.matchesFull(chars[i].toString())) chars[i] = flip(chars[i])

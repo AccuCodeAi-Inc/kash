@@ -1471,7 +1471,11 @@ internal class Lexer(
         var i = 0
         while (i < body.length) {
             when (val c = body[i]) {
-                '\\' if i + 1 < body.length && body[i + 1] in setOf('$', '`', '\\', '\n') -> {
+                '\\' if i + 1 < body.length &&
+                    body[i + 1].let {
+                        it == '$' || it == '`' || it == '\\' || it == '\n'
+                    }
+                -> {
                     flush()
                     parts += WordChunk.Escaped(body[i + 1].toString())
                     i += 2
@@ -4902,12 +4906,6 @@ internal class Lexer(
                         // set — bash `"${IFS+\}z}"` → `}z` (strip `\` before `}`)
                         // but plain `"\}"` → `\}` (preserve). Verified against
                         // bash 5.3.
-                        val dqEscapeSet =
-                            if (defaultValueOp) {
-                                setOf('$', '`', '"', '\\', '\n', '}')
-                            } else {
-                                setOf('$', '`', '"', '\\', '\n')
-                            }
                         // In a patsub replacement operand, `\X` strips the
                         // backslash for ANY X — bash's
                         // `pattern-sub operand path` path runs the operand
@@ -4925,10 +4923,10 @@ internal class Lexer(
                             // top-level dq scanner does.
                             bumpLine()
                             // don't append
-                        } else if (patsubRepl && dqDepth > 0 && n !in dqEscapeSet) {
+                        } else if (patsubRepl && dqDepth > 0 && !isDqEscapable(n, defaultValueOp)) {
                             flushLit()
                             parts += WordChunk.Escaped(n.toString())
-                        } else if (dqDepth > 0 && n !in dqEscapeSet) {
+                        } else if (dqDepth > 0 && !isDqEscapable(n, defaultValueOp)) {
                             lit.append('\\')
                             lit.append(n)
                         } else {
@@ -5300,7 +5298,7 @@ internal class Lexer(
                     pos++
                     if (pos < source.length) {
                         val n = source[pos]
-                        if (n in setOf('$', '`', '"', '\\', '\n')) {
+                        if (isDqEscapable(n)) {
                             if (n == '\n') {
                                 bumpLine()
                             } else {
@@ -5360,6 +5358,18 @@ internal class Lexer(
         return WordChunk.DoubleQuoted(parts)
     }
 }
+
+/**
+ * Inside a double-quoted context, a backslash is only special before one of
+ * these characters (bash's `dquote.c` escape set). Defined as a predicate,
+ * not a `Set`, so the per-backslash hot paths in [Lexer] allocate nothing and
+ * don't box the char. With [includeRBrace] true the `}` of a default-value
+ * `${x+\}}` operand also joins the set (see the readWordChunks call site).
+ */
+private fun isDqEscapable(
+    c: Char,
+    includeRBrace: Boolean = false,
+): Boolean = c == '$' || c == '`' || c == '"' || c == '\\' || c == '\n' || (includeRBrace && c == '}')
 
 /**
  * ANSI-C `$'\X'` escapes that map a single literal char to a single output

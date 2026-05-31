@@ -1,6 +1,7 @@
 package com.accucodeai.kash
 
 import kotlinx.coroutines.test.runTest
+import kotlin.coroutines.coroutineContext
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertTrue
@@ -9,11 +10,17 @@ import kotlin.test.assertTrue
  * Covers the `ulimit` builtin's read/write/format surface. NPROC
  * enforcement is in [NprocLimitTest]; this file pins the builtin's own
  * argument parsing and rlimit-map plumbing.
+ *
+ * The procsub-bearing cases (`<(...)`) spawn background driver coroutines;
+ * threading `coroutineContext` into [Kash] keeps them on the `runTest` test
+ * dispatcher (virtual time, single-threaded) instead of the shared
+ * `Dispatchers.Default` pool, so fd reclamation is deterministic rather
+ * than racing the pool under concurrent suite load.
  */
 class UlimitTest {
-    private suspend fun out(script: String): String = Kash().exec(script).stdout
+    private suspend fun out(script: String): String = Kash(parentContext = coroutineContext).exec(script).stdout
 
-    private suspend fun result(script: String) = Kash().exec(script)
+    private suspend fun result(script: String) = Kash(parentContext = coroutineContext).exec(script)
 
     @Test
     fun dashU_readsDefault() =

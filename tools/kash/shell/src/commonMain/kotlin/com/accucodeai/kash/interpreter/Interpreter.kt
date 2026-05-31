@@ -176,6 +176,15 @@ public class Interpreter(
          * Per-session; backgrounded jobs run outside the gate.
          */
         val stopGate: com.accucodeai.kash.signals.StopGate,
+        /**
+         * Compiled-glob cache, shared by reference across the whole fork
+         * tree. Unlike [hashCache] (copied per fork, since hash entries are
+         * `$PATH`-dependent shell state a subshell can diverge on), a
+         * [CompiledGlob] is a pure function of its pattern with no shell
+         * state, so every `(...)`, `$(...)`, and pipeline stage can safely
+         * reuse the parent's warm cache instead of recompiling from cold.
+         */
+        val globCache: GlobCache,
     )
 
     /**
@@ -506,6 +515,17 @@ public class Interpreter(
 
     /** Cleared on `$PATH` mutation and on `hash -r`. POSIX [XCU §hash](https://pubs.opengroup.org/onlinepubs/9699919799/utilities/V3_chap02.html#tag_18_06). */
     internal val hashCache: MutableMap<String, Resolved> = mutableMapOf()
+
+    /**
+     * Compiled-glob cache, shared across every [expander] this interpreter
+     * builds so repeated string-op patterns (e.g. a basename-strip in a loop
+     * body) compile their RE2 forms once. A forked subshell inherits it by
+     * reference (via [SharedSession]) — kash forks readily, so a per-fork
+     * cache would be cold on every `(...)`/`$(...)`/pipeline stage. The root
+     * (no shared session) owns a fresh one; it dies with the session.
+     */
+    internal val globCache: GlobCache =
+        sharedSession?.globCache ?: GlobCache()
 
     /**
      * Sync the visible `BASH_CMDS` associative array with the current
@@ -1016,6 +1036,10 @@ public class Interpreter(
                         // foreground statement under monitor mode would
                         // be pause-gated by the SAME gate the root sees.
                         stopGate = stopGate,
+                        // Share the warm compiled-glob cache by reference —
+                        // compiled globs are pure, so a subshell reusing the
+                        // parent's avoids recompiling from cold on every fork.
+                        globCache = globCache,
                     ),
                 process = process.fork(),
                 randomSource = randomSource,

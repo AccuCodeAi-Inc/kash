@@ -3,6 +3,8 @@ package com.accucodeai.kash.interpreter
 import com.accucodeai.kash.api.util.matchGlob
 import com.accucodeai.kash.shared.regex.LinearRegex
 import com.accucodeai.kash.shared.regex.RegexMatch
+import kotlin.concurrent.atomics.AtomicReference
+import kotlin.concurrent.atomics.ExperimentalAtomicApi
 
 /**
  * Wrap a bash glob pattern as a single object exposing the operations the
@@ -260,5 +262,63 @@ internal class CompiledGlob private constructor(
                 )
             }
         }
+    }
+}
+
+/**
+ * Machine-scoped cache of [CompiledGlob]s, keyed by pattern.
+ *
+ * Compiling a pattern builds up to SIX RE2 patterns (longest/shortest ×
+ * body/start/end/full), each an NFA/DFA construction — the most expensive op
+ * in this subsystem. The string parameter-expansion operators (prefix/suffix
+ * strip `${var##pat}`, substitution `${var/pat/rep}`, case-mod `${var^^}`, …)
+ * recompile the same pattern on every call, so a basename-strip inside a loop
+ * recompiles one identical glob every iteration. Caching turns near-100% of
+ * those compiles into a map lookup.
+ *
+ * (Pathname globbing i.e. `echo *.kt` — deliberately does NOT use this. A real
+ * A/B showed RE2's per-match setup is ~2× slower than the trivial recursive
+ * matcher for simple patterns over many short directory entries, so that path
+ * keeps the hand-rolled matcher.)
+ *
+ * Lifetime is the shell session: the root [Interpreter] owns one, and every
+ * subshell fork inherits it by reference via [Interpreter.SharedSession] (kash
+ * forks readily, so a per-fork cache would be cold on every `$(...)`). No
+ * process-global companion, so snapshots and isolated sessions never share
+ * compiled state and the cache is freed with the session.
+ *
+ * Copy-on-write behind an [AtomicReference]: reads (the hot path) are a single
+ * atomic load + map get; misses publish a new snapshot map. A lost update
+ * under a write/write race (e.g. a background job expanding concurrently on
+ * the same machine) just means one entry is recomputed later — never
+ * incorrect. Two maps avoid allocating a composite cache key per lookup, and
+ * the snapshot is dropped once it exceeds [CACHE_MAX] so a script emitting
+ * unbounded distinct patterns can't grow it without limit.
+ *
+ * `public` only so it can be an opaque field on the public
+ * [Interpreter.SharedSession] (which kash forks share by reference); its API is
+ * `internal`, so nothing outside the shell module can read or mutate the cache
+ * and [CompiledGlob] stays internal.
+ */
+@OptIn(ExperimentalAtomicApi::class)
+public class GlobCache {
+    private val cacheCs = AtomicReference<Map<String, CompiledGlob>>(emptyMap())
+    private val cacheCi = AtomicReference<Map<String, CompiledGlob>>(emptyMap())
+
+    internal fun compile(
+        pattern: String,
+        caseInsensitive: Boolean = false,
+    ): CompiledGlob {
+        val ref = if (caseInsensitive) cacheCi else cacheCs
+        ref.load()[pattern]?.let { return it }
+        val compiled = CompiledGlob.compile(pattern, caseInsensitive)
+        val cur = ref.load()
+        val base = if (cur.size >= CACHE_MAX) emptyMap() else cur
+        ref.store(base + (pattern to compiled))
+        return compiled
+    }
+
+    private companion object {
+        const val CACHE_MAX = 1024
     }
 }

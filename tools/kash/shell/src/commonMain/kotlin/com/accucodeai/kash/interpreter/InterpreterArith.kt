@@ -88,6 +88,13 @@ private fun Interpreter.effectiveLineno(): Int = currentLine - linenoOffset
  * that the arithmetic parser can then consume normally.
  */
 internal suspend fun Interpreter.preexpandArithmetic(raw: String): String {
+    // Fast path: arithmetic with no `$` and no backtick needs zero
+    // pre-expansion — ArithEval reads bare identifiers (`i`, `s`) via env
+    // directly. This is the overwhelmingly common case (`i<n`, `s+i*7`,
+    // `i++`), and skipping it avoids SEVEN full-string `.replace()` scans
+    // plus the char loop below on every single arithmetic evaluation —
+    // i.e. every iteration of every `for ((;;))` / `$(( ))`.
+    if (raw.indexOf('$') < 0 && raw.indexOf('`') < 0) return raw
     // Bash performs parameter expansion on the WHOLE arithmetic string
     // before evaluation. Inline the special-name expansions ArithEval
     // can't parse on its own:

@@ -1,5 +1,7 @@
 package com.accucodeai.kash.interpreter
 
+private val ARITH_ASSIGN_OPS = arrayOf("<<=", ">>=", "+=", "-=", "*=", "/=", "%=", "&=", "|=", "^=")
+
 /**
  * Bash arithmetic evaluator. Integer-only (Long). Operates over a mutable env
  * map so assignments inside an expression (e.g. `i++`, `x=5+y`) write back.
@@ -406,7 +408,7 @@ internal class ArithEval(
     /** True if the position is at the start of an assignment operator. */
     private fun looksLikeAssignOpHere(): Boolean {
         if (pos >= text.length) return false
-        for (op in listOf("<<=", ">>=", "+=", "-=", "*=", "/=", "%=", "&=", "|=", "^=")) {
+        for (op in ARITH_ASSIGN_OPS) {
             if (peek2(op)) return true
         }
         return text[pos] == '=' && !peek2("==")
@@ -982,7 +984,7 @@ internal class ArithEval(
     private fun tryReadAssignOp(): String? {
         skipWs()
         // Multi-char first.
-        for (op in listOf("<<=", ">>=", "+=", "-=", "*=", "/=", "%=", "&=", "|=", "^=")) {
+        for (op in ARITH_ASSIGN_OPS) {
             if (peek2(op)) {
                 pos += op.length
                 return op

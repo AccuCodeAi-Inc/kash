@@ -48,13 +48,23 @@ internal fun Interpreter.expander(): Expander =
         cwd = cwd,
         scriptName = dollarZero,
         lastBgPid = lastBgPidMasked(),
-        indexedArrays = arraysWithSyntheticCallStack(),
-        assocArrays =
-            buildMap {
-                for (name in varTable.visibleNames()) {
-                    varTable.find(name)?.assocView?.let { put(name, it) }
-                }
-            },
+        // Live per-name views, NOT snapshots. The Expander only point-accesses
+        // these (`name in arrays`, `arrays[name]`), so each lookup is an
+        // O(scope-depth) VarTable resolve — no whole-variable-table walk or map
+        // build per `${...}`. Hook-backed specials (FUNCNAME/BASH_SOURCE/…) are
+        // surfaced via [Variable.indexedView], same as the old snapshot.
+        indexedArraysProvider = {
+            LiveNamedView(
+                getter = { n -> varTable.find(n)?.indexedView },
+                names = { varTable.visibleNames().filter { varTable.find(it)?.indexedView != null } },
+            )
+        },
+        assocArraysProvider = {
+            LiveNamedView(
+                getter = { n -> varTable.find(n)?.assocView },
+                names = { varTable.visibleNames().filter { varTable.find(it)?.assocView != null } },
+            )
+        },
         currentLine = (currentLine - linenoOffset).coerceAtLeast(0),
         userDb = userDb,
         posixMode = posixModeRuntime,
@@ -77,6 +87,7 @@ internal fun Interpreter.expander(): Expander =
         },
         parameterTransformOp = { op, name -> parameterTransformDispatch(op, name) },
         nounset = nounset,
+        globCache = globCache,
         assignArrayElement = { name, sub, value ->
             // `${name[sub]=value}` element assignment from inside parameter
             // expansion. Synchronously mutate the IndexedArraysView /
@@ -352,19 +363,6 @@ private fun Interpreter.composeDashFlags(): String {
  * `FUNCNAME=...` is shadowed when inside a function (bash also makes
  * these special and shadows the env value during function execution).
  */
-private fun Interpreter.arraysWithSyntheticCallStack(): Map<String, Map<Int, String>> {
-    // DIRSTACK / FUNCNAME / BASH_LINENO / BASH_SOURCE are now
-    // hook-backed [Variable]s registered at session init (see
-    // [Interpreter.registerSpecialVariables]). [Variable.indexedView]
-    // surfaces their live values; user-assigned indexed arrays use
-    // the same path. Single walk, no per-call merge.
-    val out = LinkedHashMap<String, Map<Int, String>>()
-    for (name in varTable.visibleNames()) {
-        varTable.find(name)?.indexedView?.let { out[name] = it }
-    }
-    return out
-}
-
 internal suspend fun Interpreter.expandArg(word: Word): List<String> {
     val exp = expander()
     val out = exp.expandArg(preprocessWord(word))

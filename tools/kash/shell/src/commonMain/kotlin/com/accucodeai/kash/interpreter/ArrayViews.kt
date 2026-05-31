@@ -212,6 +212,44 @@ internal class AssocArraysView(
     }
 }
 
+/**
+ * Read-only `Map` view resolved per-key from a backing store, with no upfront
+ * materialization. Used to hand the [Expander] the indexed/assoc array storage:
+ * the Expander only ever point-accesses it (`name in arrays`, `arrays[name]`),
+ * which become O(scope-depth) [VarTable] lookups instead of building a
+ * whole-variable-table snapshot on every `${...}` expansion. The bulk views
+ * ([keys]/[entries]/[values]/[size]) fall back to the full name walk, but the
+ * Expander never hits those on the hot path.
+ *
+ * Pure Kotlin (no `java.*`) so it compiles on wasmJs as well as JVM.
+ */
+internal class LiveNamedView<V : Any>(
+    private val getter: (String) -> V?,
+    private val names: () -> List<String>,
+) : Map<String, V> {
+    override fun get(key: String): V? = getter(key)
+
+    override fun containsKey(key: String): Boolean = getter(key) != null
+
+    override fun isEmpty(): Boolean = names().isEmpty()
+
+    override val size: Int get() = names().size
+
+    override fun containsValue(value: V): Boolean = names().any { getter(it) == value }
+
+    override val keys: Set<String> get() = names().toCollection(LinkedHashSet())
+
+    override val values: Collection<V> get() = names().mapNotNull(getter)
+
+    override val entries: Set<Map.Entry<String, V>>
+        get() = names().mapNotNullTo(LinkedHashSet()) { n -> getter(n)?.let { ViewEntry(n, it) } }
+
+    private class ViewEntry<V>(
+        override val key: String,
+        override val value: V,
+    ) : Map.Entry<String, V>
+}
+
 /** Helper for getOrPut semantics through a view: existing map wins, else install a fresh empty one. */
 internal fun IndexedArraysView.getOrPutIndexed(name: String): MutableMap<Int, String> {
     get(name)?.let { return it }
