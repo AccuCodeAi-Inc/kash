@@ -159,6 +159,117 @@ public suspend fun commitTouchesAnyOf(
     return false
 }
 
+/** Which flavor of pickaxe search to run. */
+internal enum class PickaxeMode { S, G }
+
+/**
+ * A `git log -S<string>` / `-G<regex>` pickaxe predicate.
+ *
+ *  - [PickaxeMode.S] selects commits that change the *number of
+ *    occurrences* of [needle] in any file (literal by default, regex
+ *    under `--pickaxe-regex`).
+ *  - [PickaxeMode.G] selects commits whose diff has an added or removed
+ *    line matching [regex].
+ */
+internal class Pickaxe(
+    val mode: PickaxeMode,
+    val needle: String,
+    val isRegex: Boolean,
+    val ignoreCase: Boolean,
+) {
+    /** Compiled form, used for `-G` and for `-S --pickaxe-regex`. */
+    val regex: Regex? =
+        if (mode == PickaxeMode.G || isRegex) {
+            Regex(needle, if (ignoreCase) setOf(RegexOption.IGNORE_CASE) else emptySet())
+        } else {
+            null
+        }
+}
+
+/**
+ * Apply a [Pickaxe] to [commitSha] (vs its first parent; root commits
+ * diff against empty). Honors [pathFilter] so `-S<str> -- <path>` only
+ * inspects matching files.
+ */
+internal suspend fun commitMatchesPickaxe(
+    repo: GitRepo,
+    commitSha: String,
+    pathFilter: List<String>,
+    pickaxe: Pickaxe,
+): Boolean {
+    val commit = repo.objects.readCommit(commitSha)
+    val newSide = flattenTree(repo, commit.tree)
+    val oldSide =
+        commit.parents.firstOrNull()?.let { p ->
+            flattenTree(repo, repo.objects.readCommit(p).tree)
+        } ?: emptyMap()
+
+    for (path in (oldSide.keys + newSide.keys).sorted()) {
+        if (!matchesPath(path, pathFilter)) continue
+        val l = oldSide[path]
+        val r = newSide[path]
+        val lBytes = l?.bytes ?: ByteArray(0)
+        val rBytes = r?.bytes ?: ByteArray(0)
+        if (l != null && r != null && lBytes.contentEquals(rBytes)) continue
+        when (pickaxe.mode) {
+            PickaxeMode.S -> {
+                val oldCount = countOccurrences(lBytes.decodeToString(), pickaxe)
+                val newCount = countOccurrences(rBytes.decodeToString(), pickaxe)
+                if (oldCount != newCount) return true
+            }
+
+            PickaxeMode.G -> {
+                val patch =
+                    unifiedDiff(
+                        oldBytes = lBytes,
+                        newBytes = rBytes,
+                        oldLabel = "a/$path",
+                        newLabel = "b/$path",
+                        contextLines = 0,
+                    )
+                if (diffAddRemoveMatches(patch, pickaxe.regex!!)) return true
+            }
+        }
+    }
+    return false
+}
+
+/** Count non-overlapping occurrences of the pickaxe needle in [text]. */
+private fun countOccurrences(
+    text: String,
+    pickaxe: Pickaxe,
+): Int {
+    if (pickaxe.isRegex) {
+        return pickaxe.regex!!.findAll(text).count()
+    }
+    val needle = pickaxe.needle
+    if (needle.isEmpty()) return 0
+    var count = 0
+    var idx = 0
+    while (true) {
+        val found = text.indexOf(needle, idx, ignoreCase = pickaxe.ignoreCase)
+        if (found < 0) break
+        count++
+        idx = found + needle.length
+    }
+    return count
+}
+
+/** Does any added/removed line of [patch] match [regex] (a `-G` hit)? */
+private fun diffAddRemoveMatches(
+    patch: String,
+    regex: Regex,
+): Boolean {
+    for (line in patch.lineSequence()) {
+        if (line.isEmpty()) continue
+        val c = line[0]
+        if (c != '+' && c != '-') continue
+        if (line.startsWith("+++") || line.startsWith("---")) continue
+        if (regex.containsMatchIn(line.substring(1))) return true
+    }
+    return false
+}
+
 internal fun matchesPath(
     path: String,
     filter: List<String>,

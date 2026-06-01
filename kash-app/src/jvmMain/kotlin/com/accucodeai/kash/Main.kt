@@ -12,7 +12,10 @@ import com.accucodeai.kash.api.user.UserDatabase
 import com.accucodeai.kash.app.KashSnapshotStore
 import com.accucodeai.kash.app.appStandardRegistry
 import com.accucodeai.kash.fs.InMemoryFs
+import com.accucodeai.kash.fs.MountedFileSystem
 import com.accucodeai.kash.fs.installSystemBin
+import com.accucodeai.kash.snapshot.MachineSnapshot
+import com.accucodeai.kash.snapshot.SnapshotPayload
 import com.accucodeai.kash.snapshot.restoreFsAndSlots
 import com.accucodeai.kash.terminal.posix.Libc
 import com.accucodeai.kash.terminal.posix.PosixTerminalControl
@@ -162,7 +165,24 @@ public fun main(args: Array<String>) {
             exitProcess(1)
         }
     }
-    val loaded = store?.loadOrNull()
+    val loadedPayload = store?.loadOrNull()
+    // A FULL envelope carries the machine state we resume slots from; an
+    // FS_ONLY envelope only rehydrates the filesystem (no slot to resume).
+    val loaded: MachineSnapshot? =
+        when (loadedPayload) {
+            is SnapshotPayload.Full -> {
+                loadedPayload.snapshot
+            }
+
+            is SnapshotPayload.FsOnly -> {
+                (mountedMachine.fs as? MountedFileSystem)?.restore(loadedPayload.snapshot)
+                null
+            }
+
+            null -> {
+                null
+            }
+        }
     if (loaded != null) {
         // FS always comes back; per-pid slots are dropped at this point —
         // we re-apply at most one slot below, AFTER ensureInit, so the
@@ -171,7 +191,7 @@ public fun main(args: Array<String>) {
         mountedMachine.restoreFsAndSlots(loaded)
         mountedMachine.snapshotSlots.clear()
     }
-    if (flags.resumeEnabled && flags.resumeExplicit && loaded == null) {
+    if (flags.resumeEnabled && flags.resumeExplicit && loadedPayload == null) {
         // User explicitly typed `--resume` but there's no snapshot file on
         // disk. Fatal — explicit --resume is an assertion. Silent fresh
         // boot is reserved for the implicit-default case.
@@ -222,7 +242,7 @@ public fun main(args: Array<String>) {
         if (sourceSlot == null) {
             if (flags.resumeExplicit) {
                 System.err.println(
-                    "kash: --resume ${flags.resumePid}: no slot at pid ${flags.resumePid} in ${store.snapshotPath}",
+                    "kash: --resume ${flags.resumePid}: no slot at pid ${flags.resumePid} in ${store?.snapshotPath}",
                 )
                 exitProcess(1)
             }

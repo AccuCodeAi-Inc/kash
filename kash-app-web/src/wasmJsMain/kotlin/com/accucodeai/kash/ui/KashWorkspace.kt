@@ -95,6 +95,8 @@ import com.accucodeai.kash.api.CommandRegistry
 import com.accucodeai.kash.api.sandbox.NetworkPolicy
 import com.accucodeai.kash.fs.sanitizeDropName
 import com.accucodeai.kash.fs.uniqueDropPath
+import com.accucodeai.kash.snapshot.Kind
+import com.accucodeai.kash.snapshot.SnapshotPayload
 import com.accucodeai.kash.webres.JetBrainsMono_Bold
 import com.accucodeai.kash.webres.JetBrainsMono_Regular
 import com.accucodeai.kash.webres.NotoColorEmoji
@@ -257,8 +259,8 @@ public fun KashWorkspace(registryFactory: (NetworkPolicy) -> CommandRegistry) {
             val autosave = if (embedded) null else BrowserSnapshotStore.loadAutosave()
             if (autosave != null) {
                 when (autosave) {
-                    is BrowserSnapshotStore.Payload.Full -> workspace.restoreFull(autosave.snapshot)
-                    is BrowserSnapshotStore.Payload.FsOnly -> workspace.restoreFsOnly(autosave.snapshot)
+                    is SnapshotPayload.Full -> workspace.restoreFull(autosave.snapshot)
+                    is SnapshotPayload.FsOnly -> workspace.restoreFsOnly(autosave.snapshot)
                 }
             }
             val tab = newTab(workspace, label = "shell-$nextShellNumber", onExit = closeTab)
@@ -338,9 +340,9 @@ public fun KashWorkspace(registryFactory: (NetworkPolicy) -> CommandRegistry) {
     // interpreter slots, so we tear down every live shell first and spawn
     // a fresh one whose restore-from-slot picks up the saved state. Shared
     // by the Load-snapshot dialog and the Upload-snapshot file picker.
-    val applyPayload: (String, BrowserSnapshotStore.Payload) -> Unit = { label, payload ->
+    val applyPayload: (String, SnapshotPayload) -> Unit = { label, payload ->
         when (payload) {
-            is BrowserSnapshotStore.Payload.FsOnly -> {
+            is SnapshotPayload.FsOnly -> {
                 statusMessage =
                     if (workspace.restoreFsOnly(payload.snapshot)) {
                         "Loaded FS from “$label”."
@@ -349,7 +351,7 @@ public fun KashWorkspace(registryFactory: (NetworkPolicy) -> CommandRegistry) {
                     }
             }
 
-            is BrowserSnapshotStore.Payload.Full -> {
+            is SnapshotPayload.Full -> {
                 for (t in tabs) t.runner.stop()
                 tabs.clear()
                 activeIndex = -1
@@ -378,11 +380,11 @@ public fun KashWorkspace(registryFactory: (NetworkPolicy) -> CommandRegistry) {
             }
 
             is KashFrameRequest.Export -> {
-                val payload: BrowserSnapshotStore.Payload? =
+                val payload: SnapshotPayload? =
                     if (req.fsOnly) {
-                        workspace.takeFsSnapshot()?.let { BrowserSnapshotStore.Payload.FsOnly(it) }
+                        workspace.takeFsSnapshot()?.let { SnapshotPayload.FsOnly(it) }
                     } else {
-                        workspace.takeFullSnapshot()?.let { BrowserSnapshotStore.Payload.Full(it) }
+                        workspace.takeFullSnapshot()?.let { SnapshotPayload.Full(it) }
                     }
                 if (payload == null) {
                     kashFramePost("kashframe:error", req.replyId, "capture-failed")
@@ -574,7 +576,7 @@ public fun KashWorkspace(registryFactory: (NetworkPolicy) -> CommandRegistry) {
                             }
                             BrowserSnapshotStore.save(
                                 name,
-                                BrowserSnapshotStore.Payload.FsOnly(fsSnap),
+                                SnapshotPayload.FsOnly(fsSnap),
                             )
                         } else {
                             val machineSnap = workspace.takeFullSnapshot()
@@ -584,7 +586,7 @@ public fun KashWorkspace(registryFactory: (NetworkPolicy) -> CommandRegistry) {
                             }
                             BrowserSnapshotStore.save(
                                 name,
-                                BrowserSnapshotStore.Payload.Full(machineSnap),
+                                SnapshotPayload.Full(machineSnap),
                             )
                         }
                     statusMessage = "Saved “${saved.name}” (${formatBytes(saved.sizeBytes)})."
@@ -1840,10 +1842,10 @@ private fun SnapshotRowAction(
     }
 }
 
-private fun kindLabel(k: BrowserSnapshotStore.Kind): String =
+private fun kindLabel(k: Kind): String =
     when (k) {
-        BrowserSnapshotStore.Kind.FULL -> "Full machine"
-        BrowserSnapshotStore.Kind.FS_ONLY -> "Filesystem only"
+        Kind.FULL -> "Full machine"
+        Kind.FS_ONLY -> "Filesystem only"
     }
 
 private fun formatBytes(n: Int): String =

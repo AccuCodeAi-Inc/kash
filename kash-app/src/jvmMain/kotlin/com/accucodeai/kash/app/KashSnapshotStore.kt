@@ -1,22 +1,24 @@
 package com.accucodeai.kash.app
 
 import com.accucodeai.kash.snapshot.MachineSnapshot
-import com.accucodeai.kash.snapshot.SnapshotJson
-import kotlinx.serialization.json.Json
+import com.accucodeai.kash.snapshot.SnapshotCodec
+import com.accucodeai.kash.snapshot.SnapshotPayload
 import java.nio.file.Files
 import java.nio.file.Path
 import java.nio.file.StandardCopyOption
 
 /**
- * On-disk persistence for [MachineSnapshot], plus a PID-file lock that
+ * On-disk persistence for a [SnapshotPayload], plus a PID-file lock that
  * serializes concurrent kash invocations against the same snapshot.
  *
  * Layout for the default path `<cwd>/.kash/state.json`:
- *   .kash/state.json        — JSON-serialized [MachineSnapshot].
+ *   .kash/state.json        — a JSON [com.accucodeai.kash.snapshot.SnapshotFile]
+ *                             envelope (the same self-describing format the
+ *                             web store and download/upload use).
  *   .kash/state.json.lock   — PID of the kash process currently holding it.
  *
- * Format is JSON. The snapshot data classes are all `@Serializable`;
- * `ByteArray` file contents are encoded as Base64 via
+ * Format is JSON via [SnapshotCodec]. The snapshot data classes are all
+ * `@Serializable`; `ByteArray` file contents are encoded as Base64 via
  * [com.accucodeai.kash.snapshot.Base64ByteArraySerializer] so binary
  * payloads stay compact (~4/3× raw instead of JSON's default ~4× via
  * integer arrays). Per-command state slots are stored as `JsonElement`
@@ -77,28 +79,30 @@ public class KashSnapshotStore(
     }
 
     /**
-     * Read [snapshotPath] and decode a [MachineSnapshot]. Returns null on
-     * missing-file or any decode failure — the caller should treat null
-     * as "no prior state, fresh boot."
+     * Read [snapshotPath] and decode the [SnapshotPayload] from its
+     * envelope. Returns null on missing-file or any decode failure — the
+     * caller should treat null as "no prior state, fresh boot."
      */
-    public fun loadOrNull(): MachineSnapshot? {
+    public fun loadOrNull(): SnapshotPayload? {
         if (!Files.exists(snapshotPath)) return null
         return try {
-            val text = Files.readString(snapshotPath)
-            json.decodeFromString(MachineSnapshot.serializer(), text)
+            SnapshotCodec.decodeFromFile(Files.readString(snapshotPath))?.payload
         } catch (_: Throwable) {
             null
         }
     }
 
+    /** Convenience for the common full-machine save. */
+    public fun save(snapshot: MachineSnapshot): Unit = save(SnapshotPayload.Full(snapshot))
+
     /**
-     * Atomically write [snapshot] to [snapshotPath]: encode → write to
-     * `<path>.tmp` → atomic rename. A crash mid-write leaves the previous
-     * snapshot intact rather than truncated.
+     * Atomically write [payload] to [snapshotPath] as a self-describing
+     * envelope: encode → write to `<path>.tmp` → atomic rename. A crash
+     * mid-write leaves the previous snapshot intact rather than truncated.
      */
-    public fun save(snapshot: MachineSnapshot) {
+    public fun save(payload: SnapshotPayload) {
         Files.createDirectories(snapshotPath.parent ?: return)
-        val text = json.encodeToString(MachineSnapshot.serializer(), snapshot)
+        val text = SnapshotCodec.encodeToFile(name = "snapshot", payload = payload)
         val tmp = snapshotPath.resolveSibling(snapshotPath.fileName.toString() + ".tmp")
         Files.writeString(tmp, text)
         Files.move(
@@ -118,10 +122,5 @@ public class KashSnapshotStore(
 
     public companion object {
         public const val DEFAULT_WAIT_TIMEOUT_MS: Long = 60_000
-
-        // The one canonical snapshot codec (see :corevm SnapshotJson),
-        // shared with the web store and the shell's slot read/write so the
-        // on-disk state file round-trips identically across layers.
-        private val json: Json = SnapshotJson
     }
 }

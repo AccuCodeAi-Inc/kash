@@ -1,4 +1,4 @@
-@file:OptIn(kotlin.js.ExperimentalWasmJsInterop::class)
+@file:OptIn(ExperimentalWasmJsInterop::class)
 
 package com.accucodeai.kash.ui
 
@@ -12,6 +12,7 @@ import com.accucodeai.kash.fs.FileSystem
 import com.accucodeai.kash.fs.MountedFileSystem
 import com.accucodeai.kash.fs.MountedFsSnapshot
 import com.accucodeai.kash.snapshot.MachineSnapshot
+import com.accucodeai.kash.snapshot.SnapshotPayload
 import com.accucodeai.kash.snapshot.restoreFsAndSlots
 import com.accucodeai.kash.snapshot.snapshot as captureMachineSnapshot
 
@@ -144,11 +145,11 @@ public class KashWorkspaceVm(
      */
     public fun writeAutosave(): Boolean {
         val full = takeFullSnapshot()
-        if (full != null && BrowserSnapshotStore.saveAutosave(BrowserSnapshotStore.Payload.Full(full))) {
+        if (full != null && BrowserSnapshotStore.saveAutosave(SnapshotPayload.Full(full))) {
             return true
         }
         val fsOnly = takeFsSnapshot() ?: return false
-        return BrowserSnapshotStore.saveAutosave(BrowserSnapshotStore.Payload.FsOnly(fsOnly))
+        return BrowserSnapshotStore.saveAutosave(SnapshotPayload.FsOnly(fsOnly))
     }
 }
 

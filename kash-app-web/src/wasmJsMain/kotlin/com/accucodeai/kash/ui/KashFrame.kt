@@ -1,9 +1,10 @@
-@file:OptIn(kotlin.js.ExperimentalWasmJsInterop::class)
+@file:OptIn(ExperimentalWasmJsInterop::class)
 
 package com.accucodeai.kash.ui
 
 import com.accucodeai.kash.api.sandbox.NetworkPolicy
 import com.accucodeai.kash.api.sandbox.SandboxPolicy
+import com.accucodeai.kash.snapshot.SnapshotPayload
 import kotlinx.browser.window
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
@@ -128,7 +129,7 @@ internal sealed interface KashFrameRequest {
         override val origin: String,
         override val replyId: String,
         val name: String,
-        val payload: BrowserSnapshotStore.Payload,
+        val payload: SnapshotPayload,
     ) : KashFrameRequest
 
     /** Host wants a copy of the current workspace. */

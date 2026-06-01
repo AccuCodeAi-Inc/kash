@@ -29,6 +29,8 @@ import kotlin.time.Instant
  *  - `--author=<p>` / `--committer=<p>` / `--grep=<p>` / `-i` /
  *    `--all-match` / `--invert-grep`
  *  - `--since`/`--after` / `--until`/`--before` (committer date)
+ *  - `-S<string>` / `-G<regex>` pickaxe (`--pickaxe-regex`,
+ *    `--pickaxe-all`)
  *  - trailing `<path>...` path filter
  *
  * Output:
@@ -75,6 +77,12 @@ public fun gitLogSubcommand(): GitSubcommand =
             var decorate: String? = null // null = off; "short"/"full"
             val paths = mutableListOf<String>()
             var afterDoubleDash = false
+            // Pickaxe: raw needles captured during parse; the Pickaxe is
+            // built after the loop so `-i`/`--pickaxe-regex` (which may
+            // appear in any order) are already known.
+            var pickaxeS: String? = null
+            var pickaxeG: String? = null
+            var pickaxeRegex = false
 
             var i = 0
             while (i < args.size) {
@@ -263,6 +271,45 @@ public fun gitLogSubcommand(): GitSubcommand =
                         i++
                     }
 
+                    a == "-S" -> {
+                        if (i + 1 >= args.size) {
+                            ctx.stderr.writeUtf8("error: switch \"S\" requires a value\n")
+                            return CommandResult(exitCode = 129)
+                        }
+                        pickaxeS = args[i + 1]
+                        i += 2
+                    }
+
+                    a.startsWith("-S") -> {
+                        pickaxeS = a.substring(2)
+                        i++
+                    }
+
+                    a == "-G" -> {
+                        if (i + 1 >= args.size) {
+                            ctx.stderr.writeUtf8("error: switch \"G\" requires a value\n")
+                            return CommandResult(exitCode = 129)
+                        }
+                        pickaxeG = args[i + 1]
+                        i += 2
+                    }
+
+                    a.startsWith("-G") -> {
+                        pickaxeG = a.substring(2)
+                        i++
+                    }
+
+                    a == "--pickaxe-regex" -> {
+                        pickaxeRegex = true
+                        i++
+                    }
+
+                    a == "--pickaxe-all" -> {
+                        // Affects which files a matched changeset displays,
+                        // not which commits are selected; accepted as a no-op.
+                        i++
+                    }
+
                     a == "-i" || a == "--regexp-ignore-case" -> {
                         filters.ignoreCase = true
                         i++
@@ -362,16 +409,43 @@ public fun gitLogSubcommand(): GitSubcommand =
                 return CommandResult(exitCode = 128)
             }
 
+            if (pickaxeS != null && pickaxeG != null) {
+                ctx.stderr.writeUtf8("fatal: cannot use both -S and -G\n")
+                return CommandResult(exitCode = 128)
+            }
+            val pickaxe =
+                when {
+                    pickaxeS != null -> {
+                        Pickaxe(PickaxeMode.S, pickaxeS, pickaxeRegex, filters.ignoreCase)
+                    }
+
+                    pickaxeG != null -> {
+                        Pickaxe(PickaxeMode.G, pickaxeG, isRegex = true, ignoreCase = filters.ignoreCase)
+                    }
+
+                    else -> {
+                        null
+                    }
+                }
+
             val walk =
                 computeWalk(repo, sel) {
                     ctx.stderr.writeUtf8("fatal: ambiguous argument '$it'\n")
                 }
                     ?: return CommandResult(exitCode = 128)
 
-            // Apply content filters, then path filter, then skip/limit.
+            // Apply content filters (pure, no object reads → run first), then
+            // the diff-touching filter. A pickaxe already enforces the path
+            // filter AND a content change, so it subsumes commitTouchesAnyOf —
+            // run only one tree walk, not both.
             var filtered =
                 walk.filter { (sha, c) ->
-                    filters.matches(c) && (paths.isEmpty() || commitTouchesAnyOf(repo, sha, paths))
+                    filters.matches(c) &&
+                        when {
+                            pickaxe != null -> commitMatchesPickaxe(repo, sha, paths, pickaxe)
+                            paths.isEmpty() -> true
+                            else -> commitTouchesAnyOf(repo, sha, paths)
+                        }
                 }
             if (skip > 0) filtered = filtered.drop(skip)
             if (maxCount != Int.MAX_VALUE) filtered = filtered.take(maxCount)

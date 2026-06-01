@@ -10,6 +10,7 @@ import com.accucodeai.kash.api.git.GitHostAdapter
 import com.accucodeai.kash.api.io.writeUtf8
 import com.accucodeai.kash.tools.git.porcelain.GitSubcommand
 import com.accucodeai.kash.tools.git.porcelain.gitAddSubcommand
+import com.accucodeai.kash.tools.git.porcelain.gitBisectSubcommand
 import com.accucodeai.kash.tools.git.porcelain.gitBlameSubcommand
 import com.accucodeai.kash.tools.git.porcelain.gitBranchSubcommand
 import com.accucodeai.kash.tools.git.porcelain.gitCatFileSubcommand
@@ -108,6 +109,7 @@ public class GitCommand(
             gitCleanSubcommand(),
             gitStashSubcommand(),
             gitFetchSubcommand(),
+            gitBisectSubcommand(),
             gitBlameSubcommand(),
             gitConfigSubcommand(),
             gitRemoteSubcommand(),
@@ -387,7 +389,7 @@ public class GitCommand(
                         summary = "Display the commit history",
                         usage =
                             "git log [--oneline] [--graph] [--pretty=<fmt>] [-p] [--stat] " +
-                                "[-n <N>] [<revspec>] [-- <path>...]",
+                                "[-S<string>] [-G<regex>] [-n <N>] [<revspec>] [-- <path>...]",
                         details =
                             "First-parent walk (or topological with --graph). Pretty: %H %h %T %t %P " +
                                 "%p %an %ae %ad %ai %at %cn %ce %s %b %B %n %% plus presets " +
@@ -545,6 +547,25 @@ public class GitCommand(
                     SubHelp(
                         summary = "Annotate each line with its last-changing commit",
                         usage = "git blame [<rev>] <path>",
+                    ),
+                "bisect" to
+                    SubHelp(
+                        summary = "Use binary search to find the commit that introduced a change",
+                        usage =
+                            "git bisect start [--term-old=<t>] [--term-new=<t>] [<bad> [<good>...]] | " +
+                                "git bisect bad|good|new|old|skip [<rev>...] | " +
+                                "git bisect reset [<commit>] | git bisect run <cmd>... | " +
+                                "git bisect log | git bisect replay <logfile> | " +
+                                "git bisect terms [--term-good|--term-bad] | git bisect view",
+                        details =
+                            "Binary-searches history between a known-good and a known-bad commit. " +
+                                "`start` begins the session and checks out the midpoint; mark each " +
+                                "checked-out commit with `good`/`bad` (or custom `--term-old`/" +
+                                "`--term-new`) and bisect halves the range until it pins the first " +
+                                "bad commit. `skip` excludes untestable commits; `run <cmd>` " +
+                                "automates the loop (exit 0=good, 125=skip, 1..127=bad, >=128=abort); " +
+                                "`reset` returns to the original branch. Marks are kept as " +
+                                "refs/bisect/* and the session is replayable via `log`/`replay`.",
                     ),
                 "config" to
                     SubHelp(
@@ -786,6 +807,7 @@ public class GitCommand(
                 HelpGroup(
                     "other",
                     listOf(
+                        "bisect",
                         "cherry",
                         "cherry-pick",
                         "clean",
