@@ -246,21 +246,21 @@ private fun classifyAntlrFailure(
         return ParseResult.Incomplete("expected heredoc body", lastSignificant.line)
     }
 
-    // Compound-construct balance: more openers than closers means the input
-    // ended mid-`if`/`for`/`while`/`case`/`[[`/`{`/`(` and more lines might
-    // close them. Equal counts (or more closers) — the failure is a real
-    // syntax error.
-    val depth =
-        tokens.sumOf {
-            when (it) {
-                is Token.Keyword if it.word in COMPOUND_OPENERS -> 1
-                is Token.Keyword if it.word in COMPOUND_CLOSERS -> -1
-                is Token.Operator if it.op == "(" -> 1
-                is Token.Operator if it.op == ")" -> -1
-                else -> 0
-            }
-        }
-    return if (depth > 0) {
+    // Compound-construct balance: an unclosed opener means the input ended
+    // mid-`if`/`for`/`while`/`case`/`[[`/`{`/`(` and more lines might close
+    // it (→ Incomplete). Everything balanced (or a misplaced closer pinned
+    // by the structural scan) — the failure is a real syntax error.
+    //
+    // We reuse [findUnclosedOpener]'s stack walk rather than a naive
+    // open-minus-close token sum: a case-pattern terminator `)` (as in
+    // `Linux*)`) is a `Token.Operator ")"` but does NOT close the enclosing
+    // `case`. A flat sum miscounts it as a closer, balancing the `case` to
+    // zero and misclassifying a half-read `case` (e.g. fed one line at a time
+    // by the piped-stdin loop) as a hard Error — which then discards the
+    // pending buffer mid-statement. The stack walk only pops a `case` on
+    // `esac`, so the partial input is correctly Incomplete. A structural
+    // mismatch (closer in the wrong place) still wins as an Error.
+    return if (structural == null && findUnclosedOpener(tokens) != null) {
         ParseResult.Incomplete(msg, line)
     } else {
         ParseResult.Error(msg, effectiveLine, effectiveCol, displayTok)
