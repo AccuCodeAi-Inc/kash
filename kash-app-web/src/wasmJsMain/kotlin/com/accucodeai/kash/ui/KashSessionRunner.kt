@@ -31,6 +31,13 @@ public class KashSessionRunner(
      * remove the tab.
      */
     private val onExit: () -> Unit = {},
+    /**
+     * If non-null, the saved shell slot (opaque [InterpreterSnapshot] JSON)
+     * this tab restores. Written to the session's pid right after
+     * [Kash.newSession] so the kash REPL's slot-restore picks it up —
+     * independent of which pid the fresh fork lands on. Null = a clean shell.
+     */
+    private val restoreSlot: kotlinx.serialization.json.JsonElement? = null,
 ) {
     private val scope: CoroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
 
@@ -162,6 +169,9 @@ public class KashSessionRunner(
             )
         session = s
         sid = s.process.pid
+        // Hand this tab's saved state to its pid so the REPL's slot-restore
+        // (restoreSlotIfPresent, keyed by pid) rehydrates this exact shell.
+        restoreSlot?.let { workspace.machine.snapshotSlots[s.process.pid] = it }
         try {
             s.runShellCommand()
         } catch (_: Throwable) {

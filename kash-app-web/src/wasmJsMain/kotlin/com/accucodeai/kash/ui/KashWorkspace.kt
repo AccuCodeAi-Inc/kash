@@ -257,15 +257,34 @@ public fun KashWorkspace(registryFactory: (NetworkPolicy) -> CommandRegistry) {
             // Embedded instances start clean — never resurrect the
             // first-party autosave.
             val autosave = if (embedded) null else BrowserSnapshotStore.loadAutosave()
-            if (autosave != null) {
+            // A full autosave can hold several shells; bring each back as its
+            // own tab. FS-only (or no autosave) just opens one clean shell.
+            val slots =
                 when (autosave) {
-                    is SnapshotPayload.Full -> workspace.restoreFull(autosave.snapshot)
-                    is SnapshotPayload.FsOnly -> workspace.restoreFsOnly(autosave.snapshot)
+                    is SnapshotPayload.Full -> {
+                        workspace.restoreFullShells(autosave.snapshot)
+                    }
+
+                    is SnapshotPayload.FsOnly -> {
+                        workspace.restoreFsOnly(autosave.snapshot)
+                        null
+                    }
+
+                    null -> {
+                        null
+                    }
+                }
+            if (slots.isNullOrEmpty()) {
+                val tab = newTab(workspace, label = "shell-$nextShellNumber", onExit = closeTab)
+                nextShellNumber++
+                tabs.add(tab)
+            } else {
+                for (slot in slots) {
+                    val tab = newTab(workspace, label = "shell-$nextShellNumber", onExit = closeTab, restoreSlot = slot)
+                    nextShellNumber++
+                    tabs.add(tab)
                 }
             }
-            val tab = newTab(workspace, label = "shell-$nextShellNumber", onExit = closeTab)
-            nextShellNumber++
-            tabs.add(tab)
             activeIndex = 0
         }
     }
@@ -355,16 +374,26 @@ public fun KashWorkspace(registryFactory: (NetworkPolicy) -> CommandRegistry) {
                 for (t in tabs) t.runner.stop()
                 tabs.clear()
                 activeIndex = -1
-                val ok = workspace.restoreFull(payload.snapshot)
-                // Spawn a fresh shell either way: on failure the VM may be
-                // partially restored, but an empty terminal beats a blank
-                // screen, and the user gets a clear status message.
-                val tab = newTab(workspace, label = label, onExit = closeTab)
-                tabs.add(tab)
+                val slots = workspace.restoreFullShells(payload.snapshot)
+                // Bring back one tab per saved shell. On failure (null) the VM
+                // may be partially restored; spawn a single blank shell anyway —
+                // an empty terminal beats a blank screen, with a clear status.
+                if (slots.isNullOrEmpty()) {
+                    tabs.add(newTab(workspace, label = label, onExit = closeTab))
+                    nextShellNumber++
+                } else {
+                    for (slot in slots) {
+                        tabs.add(newTab(workspace, label = label, onExit = closeTab, restoreSlot = slot))
+                        nextShellNumber++
+                    }
+                }
                 activeIndex = 0
-                nextShellNumber++
                 statusMessage =
-                    if (ok) "Restored “$label”." else "Restored “$label” with errors — snapshot may be incompatible."
+                    if (slots != null) {
+                        "Restored “$label”."
+                    } else {
+                        "Restored “$label” with errors — snapshot may be incompatible."
+                    }
             }
         }
     }
@@ -858,9 +887,10 @@ private fun newTab(
     workspace: KashWorkspaceVm,
     label: String,
     onExit: (Long) -> Unit = {},
+    restoreSlot: kotlinx.serialization.json.JsonElement? = null,
 ): ShellTab {
     val id = nextTabId++
-    val runner = KashSessionRunner(workspace, onExit = { onExit(id) })
+    val runner = KashSessionRunner(workspace, onExit = { onExit(id) }, restoreSlot = restoreSlot)
     runner.start()
     return ShellTab(id = id, label = label, runner = runner)
 }

@@ -1,7 +1,7 @@
 package com.accucodeai.kash
 
 import com.accucodeai.kash.fs.InMemoryFs
-import com.accucodeai.kash.snapshot.InterpreterSnapshot
+import com.accucodeai.kash.snapshot.MachineSnapshot
 import com.accucodeai.kash.snapshot.SnapshotJson
 import com.accucodeai.kash.standardRegistry
 import kotlinx.coroutines.test.runTest
@@ -16,9 +16,9 @@ class SnapshotTest {
             a.exec($$"greet() { echo \"hi $FOO\"; }")
             a.exec("cd /tmp")
 
-            val json = SnapshotJson.encodeToString(a.snapshot())
-            val restored = SnapshotJson.decodeFromString<InterpreterSnapshot>(json)
-            val b = Kash.restoreSession(restored, registry = standardRegistry())
+            val json = SnapshotJson.encodeToString(MachineSnapshot.serializer(), a.machineSnapshot())
+            val restored = SnapshotJson.decodeFromString(MachineSnapshot.serializer(), json)
+            val b = Kash.restoreMachineSession(restored, registry = standardRegistry())
 
             assertEquals("/tmp", b.cwd)
             assertEquals("bar", b.env["FOO"])
@@ -31,9 +31,9 @@ class SnapshotTest {
             a.exec("echo hello > /tmp/note")
             a.exec("echo more >> /tmp/note")
 
-            val json = SnapshotJson.encodeToString(a.snapshot())
-            val restored = SnapshotJson.decodeFromString<InterpreterSnapshot>(json)
-            val b = Kash.restoreSession(restored, registry = standardRegistry())
+            val json = SnapshotJson.encodeToString(MachineSnapshot.serializer(), a.machineSnapshot())
+            val restored = SnapshotJson.decodeFromString(MachineSnapshot.serializer(), json)
+            val b = Kash.restoreMachineSession(restored, registry = standardRegistry())
 
             assertEquals("hello\nmore\n", b.exec("cat /tmp/note").stdout)
             // Pre-existing seeded dir survives the round-trip too.

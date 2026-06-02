@@ -2,11 +2,10 @@ package com.accucodeai.kash
 
 import com.accucodeai.kash.api.user.SingleUserDatabase
 import com.accucodeai.kash.fs.InMemoryFs
-import com.accucodeai.kash.snapshot.InterpreterSnapshot
+import com.accucodeai.kash.snapshot.MachineSnapshot
 import com.accucodeai.kash.snapshot.SnapshotJson
 import com.accucodeai.kash.standardRegistry
 import kotlinx.coroutines.test.runTest
-import kotlinx.serialization.encodeToString
 import kotlin.test.Test
 import kotlin.test.assertEquals
 
@@ -87,9 +86,9 @@ class UserIdentityTest {
             val db = SingleUserDatabase(name = "alice", uid = 2000, home = "/home/alice")
             val a = Kash(registry = standardRegistry(), fs = InMemoryFs(), userDatabase = db).newSession()
             a.exec("X=\$LOGNAME-\$USER")
-            val json = SnapshotJson.encodeToString(a.snapshot())
-            val restored = SnapshotJson.decodeFromString<InterpreterSnapshot>(json)
-            val b = Kash.restoreSession(restored, registry = standardRegistry(), userDatabase = db)
+            val json = SnapshotJson.encodeToString(MachineSnapshot.serializer(), a.machineSnapshot())
+            val restored = SnapshotJson.decodeFromString(MachineSnapshot.serializer(), json)
+            val b = Kash.restoreMachineSession(restored, registry = standardRegistry(), userDatabase = db)
             // Env round-trips through snapshot.env — no new snapshot field needed.
             assertEquals("alice-alice\n", b.exec("echo \$X").stdout)
             // ~alice still works after restore because userDatabase is re-injected.
@@ -108,9 +107,9 @@ class UserIdentityTest {
                     fs = InMemoryFs(),
                     userDatabase = SingleUserDatabase(name = "alice"),
                 ).newSession()
-            val snap = a.snapshot()
+            val snap = a.machineSnapshot()
             val b =
-                Kash.restoreSession(
+                Kash.restoreMachineSession(
                     snap,
                     registry = standardRegistry(),
                     userDatabase = SingleUserDatabase(name = "bob", home = "/home/bob"),

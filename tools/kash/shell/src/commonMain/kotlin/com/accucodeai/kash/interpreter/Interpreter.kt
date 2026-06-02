@@ -1540,37 +1540,18 @@ public class Interpreter(
     internal var shellPpid: Int = process.ppid ?: 0
 
     /**
-     * Capture the current shell state. Only safe to call between top-level
-     * [run] invocations — i.e. when no pipelines are in flight and the
-     * transient [outSink]/[errSink] buffers belong to the caller, not to us.
+     * Capture the current shell state into a slot. Only safe to call between
+     * top-level [run] invocations — i.e. when no pipelines are in flight and
+     * the transient [outSink]/[errSink] buffers belong to the caller, not to
+     * us.
      *
-     * The in-memory filesystem must be an [InMemoryFs]; other implementations
-     * are out of scope for snapshotting.
+     * The filesystem is **not** captured here — it's owned by the machine and
+     * snapshotted once at that level (see
+     * [com.accucodeai.kash.snapshot.MachineSnapshot]). A slot is pure shell
+     * state.
      */
-    public fun snapshot(): InterpreterSnapshot {
-        // After the PATH bootstrap, [fs] is a [MountedFileSystem] wrapping the
-        // caller's USER mount. Unwrap to the USER mount's InMemoryFs.
-        val userMountFs =
-            when (val f = fs) {
-                is InMemoryFs -> {
-                    f
-                }
-
-                is com.accucodeai.kash.fs.MountedFileSystem -> {
-                    f
-                        .mounts()
-                        .firstOrNull { it.mountPoint == "/" }
-                        ?.fs as? InMemoryFs
-                }
-
-                else -> {
-                    null
-                }
-            }
-        val inMem =
-            userMountFs
-                ?: error("snapshot() requires the FileSystem to be an InMemoryFs (got ${fs::class})")
-        return InterpreterSnapshot(
+    public fun snapshot(): InterpreterSnapshot =
+        InterpreterSnapshot(
             env = env.toMap(),
             cwd = cwd,
             functions = functions.toMap(),
@@ -1584,15 +1565,14 @@ public class Interpreter(
             readonlyVars = varTable.visibleNames().filter { varTable.find(it)?.isReadonly == true }.toSet(),
             pendingAbort = pendingAbort,
             pendingAbortCode = pendingAbortCode,
-            fs = inMem.snapshot(),
             aliases = aliases.toMap(),
         )
-    }
 
     /**
-     * Restore previously captured state into this interpreter. The filesystem
-     * is NOT replaced — pass the matching [InMemoryFs] at construction time
-     * (see `Kash.Session.restore`).
+     * Restore previously captured shell state into this interpreter. The
+     * filesystem is NOT touched — a slot carries no FS; the machine restores
+     * the FS once at its own level before this runs (see
+     * [com.accucodeai.kash.snapshot.restoreFsAndSlots]).
      */
     public fun restore(s: InterpreterSnapshot) {
         env.clear()

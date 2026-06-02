@@ -24,6 +24,10 @@ import com.accucodeai.kash.fs.installSystemBin
 import com.accucodeai.kash.fs.traced
 import com.accucodeai.kash.interpreter.Interpreter
 import com.accucodeai.kash.snapshot.InterpreterSnapshot
+import com.accucodeai.kash.snapshot.MachineSnapshot
+import com.accucodeai.kash.snapshot.SnapshotJson
+import com.accucodeai.kash.snapshot.restoreFsAndSlots
+import com.accucodeai.kash.snapshot.snapshot
 import com.accucodeai.kash.tools.ext.extCommands
 import com.accucodeai.kash.tools.forensics.forensicsCommands
 import com.accucodeai.kash.tools.kash.all.kashCommands
@@ -325,6 +329,22 @@ public class Kash(
                 clock = this@Kash.clock,
             )
 
+        init {
+            // Publish this session's shell state into the machine slot whenever
+            // a whole-machine snapshot is taken. Symmetric with the interactive
+            // REPL's provider (KashShellCommand) — without it, `machine.snapshot()`
+            // would find this RUNNING `kash` process with no slot and refuse to
+            // capture (NonQuiescentException). Registering one per session is what
+            // makes multi-session `machineSnapshot()` work. Removed in [close].
+            machine.liveSnapshotProviders[process.pid] = ::publishSlot
+        }
+
+        /** Encode this session's interpreter into its per-pid machine slot. */
+        private fun publishSlot() {
+            machine.snapshotSlots[process.pid] =
+                SnapshotJson.encodeToJsonElement(InterpreterSnapshot.serializer(), interpreter.snapshot())
+        }
+
         public val cwd: String get() = interpreter.cwd
         public val env: Map<String, String> get() = interpreter.env
 
@@ -564,10 +584,28 @@ public class Kash(
             get() = interpreter.isExecutingForeground
 
         /**
-         * Capture a quiescent snapshot of this session's state. Safe to call
-         * between [exec] invocations. The VM's [fs] must be an [InMemoryFs].
+         * Capture this session's shell-state slot ([InterpreterSnapshot]) —
+         * env, cwd, functions, aliases, etc., but NOT the filesystem (that's
+         * machine-owned; see [machineSnapshot]). Safe to call between [exec]
+         * invocations. Use [attachSession] to graft the result onto a VM that
+         * already has the matching FS.
          */
         public fun snapshot(): InterpreterSnapshot = interpreter.snapshot()
+
+        /**
+         * Capture a [MachineSnapshot] — the whole-machine form that
+         * [com.accucodeai.kash.snapshot.SnapshotFile]'s FULL payload wraps, i.e.
+         * the canonical shape the web UI and `.kash/state.json` use — INCLUDING
+         * every live session's interpreter state.
+         *
+         * Just delegates to [machine.snapshot]: each session registered a
+         * slot-publishing provider at construction (see the `init` block), so the
+         * machine captures all sessions' slots — not just this one's. The result
+         * round-trips through the shared SnapshotFile format and back via
+         * [restoreMachineSession]. Call between [exec]s (the machine must be
+         * quiescent, as [machine.snapshot] requires).
+         */
+        public fun machineSnapshot(): MachineSnapshot = machine.snapshot()
 
         /**
          * Cancel every in-flight background job, tear down the session's
@@ -576,6 +614,7 @@ public class Kash(
          */
         override fun close() {
             interpreter.close()
+            machine.liveSnapshotProviders.remove(process.pid)
             machine.sessions.remove(process.pid)
             machine.unregisterProcess(process.pid)
         }
@@ -639,13 +678,15 @@ fi
 """
 
         /**
-         * Rehydrate a session snapshot onto an existing [Kash]. Creates a
-         * fresh session, then restores its interpreter state (env, cwd,
+         * Rehydrate a slot ([InterpreterSnapshot]) onto an existing [Kash].
+         * Creates a fresh session, then restores its shell state (env, cwd,
          * functions, locals, aliases, etc.) from [snapshot].
          *
-         * The VM's filesystem is NOT replaced — caller is responsible for
-         * restoring the FS independently via [com.accucodeai.kash.fs.InMemoryFs]
-         * construction with the snapshot's `fs` field.
+         * The VM's filesystem is NOT replaced — a slot carries no FS. The
+         * caller is responsible for having booted [attachTo] on the right FS
+         * (a FULL [MachineSnapshot] via [restoreMachineSession], or an FS_ONLY
+         * snapshot). This is the one and only meaning of a bare
+         * [InterpreterSnapshot]: a slot grafted onto an already-FS'd VM.
          */
         public fun attachSession(
             snapshot: InterpreterSnapshot,
@@ -667,18 +708,77 @@ fi
         }
 
         /**
-         * Rehydrate a session into a freshly-built VM. Convenience over
-         * [attachSession] for the common single-session use case — builds a
-         * [Kash] with the supplied pure-code config (registry, fs, userDb,
-         * sandbox, parentContext, clock), then attaches the snapshot to a
-         * new session on it. The snapshot's `fs` field seeds the in-memory
-         * filesystem.
+         * Rehydrate a whole [MachineSnapshot] (typically decoded from a
+         * [com.accucodeai.kash.snapshot.SnapshotFile] FULL payload) into a freshly
+         * built VM and bring back **every** shell session it held — the
+         * multi-session counterpart of [restoreMachineSession].
          *
-         * Sized to match the old `KashSession.restore(...)` API so callers
-         * with a one-session-per-VM model migrate without restructuring.
+         * Two-part restore, mirroring [Session.machineSnapshot]'s capture:
+         *  - the machine's mounted filesystem + per-pid slots come back via
+         *    [restoreFsAndSlots];
+         *  - each shell slot (env, cwd, functions, aliases) becomes its own
+         *    [Session]. Slots carry no FS, so there's nothing to double-restore —
+         *    the FS came back once, shared by all sessions.
+         *
+         * A slot IS a session's shell state, keyed by its pid; only real shells
+         * publish one (init / host bookkeeping never do), so the slot map is
+         * exactly the set of shells to rebuild. This lightweight path forks fresh
+         * pids rather than resurrecting the saved process table (that's
+         * [restoreProcessTree]'s job), so `$$`/`$PPID` differ from the snapshot —
+         * [RestoredMachine.sessions] is therefore keyed by each session's
+         * **original** pid so callers can reattach (e.g. a web tab to its shell).
          */
-        public fun restoreSession(
-            snapshot: InterpreterSnapshot,
+        public fun restoreMachine(
+            snapshot: MachineSnapshot,
+            registry: CommandRegistry,
+            customCommands: List<Command> = emptyList(),
+            interactive: Boolean = false,
+            userDatabase: UserDatabase = UserDatabase.Default,
+            sandbox: SandboxPolicy = SandboxPolicy.TRUSTED,
+            parentContext: CoroutineContext = Dispatchers.Default,
+            clock: () -> Long = { Clock.System.now().epochSeconds },
+        ): RestoredMachine {
+            val kash =
+                Kash(
+                    // Fresh in-memory FS; restoreFsAndSlots replaces its contents.
+                    fs = InMemoryFs(clock = clock),
+                    registry = registry,
+                    userDatabase = userDatabase,
+                    sandbox = sandbox,
+                    parentContext = parentContext,
+                )
+            kash.machine.restoreFsAndSlots(snapshot)
+            // Snapshot the saved slots (originalPid -> shell state), then clear the
+            // live map: the fresh sessions below fork new pids that could collide
+            // with a saved pid, and a leftover slot would be silently re-applied by
+            // the REPL slot-restore path. We apply each slot directly instead.
+            val savedSlots = snapshot.snapshotSlots.toMap()
+            kash.machine.snapshotSlots.clear()
+            val sessions = LinkedHashMap<Int, Session>()
+            for ((originalPid, slot) in savedSlots) {
+                val session = kash.newSession(interactive = interactive, customCommands = customCommands)
+                runCatching {
+                    session.interpreter.restore(
+                        SnapshotJson.decodeFromJsonElement(InterpreterSnapshot.serializer(), slot),
+                    )
+                }
+                sessions[originalPid] = session
+            }
+            return RestoredMachine(kash, sessions)
+        }
+
+        /**
+         * Single-session convenience over [restoreMachine] and the canonical way
+         * to boot one saved shell from disk. Restores the VM, then returns the
+         * sole shell session.
+         *
+         * A snapshot with no shell slot still yields a usable blank session on the
+         * restored filesystem. Two-or-more shells is a genuinely multi-session
+         * machine this single-[Session] return can't represent, so it throws —
+         * use [restoreMachine] for those.
+         */
+        public fun restoreMachineSession(
+            snapshot: MachineSnapshot,
             registry: CommandRegistry,
             customCommands: List<Command> = emptyList(),
             interactive: Boolean = false,
@@ -687,24 +787,46 @@ fi
             parentContext: CoroutineContext = Dispatchers.Default,
             clock: () -> Long = { Clock.System.now().epochSeconds },
         ): Session {
-            val fs = InMemoryFs(snapshot.fs, clock)
-            val kash =
-                Kash(
-                    fs = fs,
+            val restored =
+                restoreMachine(
+                    snapshot = snapshot,
                     registry = registry,
+                    customCommands = customCommands,
+                    interactive = interactive,
                     userDatabase = userDatabase,
                     sandbox = sandbox,
                     parentContext = parentContext,
+                    clock = clock,
                 )
-            return attachSession(
-                snapshot = snapshot,
-                attachTo = kash,
-                interactive = interactive,
-                customCommands = customCommands,
-            )
+            return when (val n = restored.sessions.size) {
+                0 -> {
+                    restored.kash.newSession(interactive = interactive, customCommands = customCommands)
+                }
+
+                1 -> {
+                    restored.sessions.values.single()
+                }
+
+                else -> {
+                    error(
+                        "restoreMachineSession: snapshot has $n shell sessions; use restoreMachine",
+                    )
+                }
+            }
         }
     }
 }
+
+/**
+ * Result of [Kash.Companion.restoreMachine]: the rebuilt [Kash] VM and every
+ * shell [Kash.Session] restored from the snapshot, keyed by each session's
+ * **original** (pre-snapshot) pid. The caller owns the VM's lifecycle — close
+ * the individual sessions and/or the [kash] when done.
+ */
+public class RestoredMachine(
+    public val kash: Kash,
+    public val sessions: Map<Int, Kash.Session>,
+)
 
 /**
  * Standard kash command catalog: the shell itself (`kash`) plus every

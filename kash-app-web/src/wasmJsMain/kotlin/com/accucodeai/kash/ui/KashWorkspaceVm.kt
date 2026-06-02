@@ -108,22 +108,26 @@ public class KashWorkspaceVm(
         }
 
     /**
-     * Apply a saved snapshot to this VM. **Destroys** any current shells'
-     * slot state: caller must close all tabs first so their kash
-     * processes exit cleanly before the snapshot's slots overwrite the
-     * live slot map.
+     * Restore the workspace FS from a full snapshot and return every saved
+     * shell's slot (opaque [com.accucodeai.kash.snapshot.InterpreterSnapshot]
+     * JSON). The caller spawns one tab per returned slot, handing each to a
+     * [KashSessionRunner] so its REPL rehydrates that exact shell — so a
+     * snapshot taken with N tabs comes back as N tabs.
      *
-     * Returns false (and leaves the VM in whatever partial state the
-     * restore reached) if the snapshot can't be applied — a corrupt or
-     * incompatible payload that decoded structurally but fails semantic
-     * rehydration. Never throws, so a bad snapshot can't crash the app.
+     * The slots are keyed by pid in the snapshot, but tabs fork fresh pids, so
+     * we return the slots positionally and let each runner inject its own at
+     * its pid; the live slot map is cleared to keep a coincidentally-matching
+     * fork from picking up a stale entry. Returns null on failure (the FS may
+     * be left partially restored — callers still spawn a blank shell).
      */
-    public fun restoreFull(snapshot: MachineSnapshot): Boolean =
+    public fun restoreFullShells(snapshot: MachineSnapshot): List<kotlinx.serialization.json.JsonElement>? =
         try {
             machine.restoreFsAndSlots(snapshot)
-            true
+            val slots = snapshot.snapshotSlots.values.toList()
+            machine.snapshotSlots.clear()
+            slots
         } catch (_: Throwable) {
-            false
+            null
         }
 
     /** Apply an FS-only snapshot. Safe while shells are running. Never throws. */

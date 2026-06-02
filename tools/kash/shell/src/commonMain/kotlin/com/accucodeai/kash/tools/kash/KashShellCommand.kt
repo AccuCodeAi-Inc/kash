@@ -387,9 +387,9 @@ public class KashShellCommand :
             proc.machine.snapshotSlots[proc.pid] =
                 SnapshotJson.encodeToJsonElement(InterpreterSnapshot.serializer(), snap)
         } catch (_: Throwable) {
-            // Snapshot may fail if the FS isn't an InMemoryFs (the
-            // Interpreter.snapshot() contract requires one). Skip silently
-            // — no snapshot is better than crashing on shutdown.
+            // Best-effort — a slot is pure shell state and capture shouldn't
+            // throw, but skip silently if it ever does: no snapshot is better
+            // than crashing on shutdown.
         }
     }
 

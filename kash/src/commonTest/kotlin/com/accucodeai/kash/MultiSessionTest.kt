@@ -1,6 +1,7 @@
 package com.accucodeai.kash
 
 import com.accucodeai.kash.fs.InMemoryFs
+import com.accucodeai.kash.snapshot.SessionSnapshot
 import kotlinx.coroutines.test.runTest
 import kotlin.test.Test
 import kotlin.test.assertEquals
@@ -184,10 +185,10 @@ class MultiSessionTest {
 
     @Test fun snapshotRoundTripsPerSession() =
         runTest {
-            // Each Kash.Session.snapshot() captures THIS session's state.
-            // The VM-level FS is captured into the snapshot's `fs` field, so
-            // a single-session round-trip via `Kash.restoreSession` works the
-            // same as the legacy KashSession.restore did.
+            // Session.machineSnapshot() captures the whole machine — this
+            // session's shell-state slot plus the VM-level FS (stored once) —
+            // and restoreMachineSession boots a fresh VM from it. This is the
+            // canonical single-session save/restore path.
             val kash = Kash(registry = standardRegistry(), fs = InMemoryFs(), parentContext = coroutineContext)
             val captured =
                 try {
@@ -196,18 +197,120 @@ class MultiSessionTest {
                         a.exec("FOO=multi")
                         a.exec("greet() { echo \"hi \$FOO\"; }")
                         a.exec("cd /tmp")
-                        a.snapshot()
+                        a.machineSnapshot()
                     } finally {
                         a.close()
                     }
                 } finally {
                     kash.close()
                 }
-            val restored = Kash.restoreSession(captured, registry = standardRegistry())
+            val restored = Kash.restoreMachineSession(captured, registry = standardRegistry())
             try {
                 assertEquals("/tmp", restored.cwd)
                 assertEquals("multi", restored.env["FOO"])
                 assertEquals("hi multi\n", restored.exec("greet").stdout)
+            } finally {
+                restored.close()
+            }
+        }
+
+    @Test fun machineSnapshotCapturesEverySessionsState() =
+        runTest {
+            // Whole-machine capture must not throw when more than one session is
+            // open, and each session's slot must be captured (not just the one
+            // machineSnapshot() is called on). Regression for the quiescence
+            // failure where only the calling session's slot was published.
+            val kash = Kash(registry = standardRegistry(), fs = InMemoryFs(), parentContext = coroutineContext)
+            val captured =
+                try {
+                    val a = kash.newSession()
+                    val b = kash.newSession()
+                    try {
+                        a.exec("WHO=alpha")
+                        b.exec("WHO=beta")
+                        // Called on `a`, but `b` is also live — must still capture.
+                        a.machineSnapshot()
+                    } finally {
+                        a.close()
+                        b.close()
+                    }
+                } finally {
+                    kash.close()
+                }
+            // Both leaders' slots are present in the snapshot.
+            val slotPids = captured.sessions.map { it.leaderPid }.filter { it in captured.snapshotSlots }
+            assertEquals(2, slotPids.size, "both live sessions should have published a slot")
+        }
+
+    @Test fun restoreMachineBringsBackEverySession() =
+        runTest {
+            // Whole-machine round-trip: two shells with distinct state are captured
+            // and both come back via restoreMachine, keyed by their original pids.
+            val kash = Kash(registry = standardRegistry(), fs = InMemoryFs(), parentContext = coroutineContext)
+            val (pidA, pidB, captured) =
+                try {
+                    val a = kash.newSession()
+                    val b = kash.newSession()
+                    try {
+                        a.exec("WHO=alpha")
+                        a.exec("cd /tmp")
+                        b.exec("WHO=beta")
+                        b.exec("mkdir -p /home/b && cd /home/b")
+                        Triple(a.process.pid, b.process.pid, a.machineSnapshot())
+                    } finally {
+                        a.close()
+                        b.close()
+                    }
+                } finally {
+                    kash.close()
+                }
+
+            val restored = Kash.restoreMachine(captured, registry = standardRegistry())
+            try {
+                assertEquals(2, restored.sessions.size)
+                val ra = restored.sessions.getValue(pidA)
+                val rb = restored.sessions.getValue(pidB)
+                assertEquals("alpha", ra.env["WHO"])
+                assertEquals("/tmp", ra.cwd)
+                assertEquals("beta", rb.env["WHO"])
+                assertEquals("/home/b", rb.cwd)
+            } finally {
+                restored.sessions.values.forEach { it.close() }
+                restored.kash.close()
+            }
+        }
+
+    @Test fun restoreIgnoresSlotlessBookkeepingSessions() =
+        runTest {
+            // restore keys off the shell slots, not the `sessions` list, so a
+            // host-registered slotless init session (kash-app / web add one with
+            // leaderPid=1) is irrelevant: the single real slot is still restored,
+            // no leader election, no blank boot.
+            val kash = Kash(registry = standardRegistry(), fs = InMemoryFs(), parentContext = coroutineContext)
+            val captured =
+                try {
+                    val a = kash.newSession()
+                    try {
+                        a.exec("MARK=shell")
+                        a.exec("cd /tmp")
+                        val snap = a.machineSnapshot()
+                        // Splice in a slotless init session ahead of the shell —
+                        // the kind of bookkeeping entry a host adds. Must not matter.
+                        snap.copy(
+                            sessions =
+                                listOf(SessionSnapshot(sid = 1, leaderPid = 1, hasControllingTty = false)) +
+                                    snap.sessions,
+                        )
+                    } finally {
+                        a.close()
+                    }
+                } finally {
+                    kash.close()
+                }
+            val restored = Kash.restoreMachineSession(captured, registry = standardRegistry())
+            try {
+                assertEquals("/tmp", restored.cwd)
+                assertEquals("shell", restored.env["MARK"])
             } finally {
                 restored.close()
             }

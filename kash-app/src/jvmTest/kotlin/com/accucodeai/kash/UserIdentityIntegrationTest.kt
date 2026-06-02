@@ -3,7 +3,7 @@ package com.accucodeai.kash
 import com.accucodeai.kash.api.user.SingleUserDatabase
 import com.accucodeai.kash.app.standardRegistry
 import com.accucodeai.kash.fs.InMemoryFs
-import com.accucodeai.kash.snapshot.InterpreterSnapshot
+import com.accucodeai.kash.snapshot.MachineSnapshot
 import com.accucodeai.kash.snapshot.SnapshotJson
 import kotlinx.coroutines.test.runTest
 import kotlin.test.Test
@@ -103,11 +103,12 @@ class UserIdentityIntegrationTest {
                 ).newSession()
             a.exec("X=\$LOGNAME-\$(id -un)")
             val snap =
-                SnapshotJson.decodeFromString<InterpreterSnapshot>(
-                    SnapshotJson.encodeToString(a.snapshot()),
+                SnapshotJson.decodeFromString(
+                    MachineSnapshot.serializer(),
+                    SnapshotJson.encodeToString(MachineSnapshot.serializer(), a.machineSnapshot()),
                 )
             val b =
-                Kash.restoreSession(
+                Kash.restoreMachineSession(
                     snap,
                     registry = standardRegistry(),
                     userDatabase = db,
